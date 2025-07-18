@@ -1,0 +1,281 @@
+{
+  "id": "nunchaku_flux_custom",
+  "name": "Nunchaku FLUX Custom Template",
+  "description": "Custom FLUX workflow with Nunchaku optimizations for text-to-image generation",
+  "category": "txt2img",
+  "workflow_json": {
+    "6": {
+      "inputs": {
+        "text": "",
+        "clip": [
+          "44",
+          0
+        ]
+      },
+      "class_type": "CLIPTextEncode",
+      "_meta": {
+        "title": "CLIP Text Encode (Positive Prompt)"
+      }
+    },
+    "8": {
+      "inputs": {
+        "samples": [
+          "13",
+          0
+        ],
+        "vae": [
+          "10",
+          0
+        ]
+      },
+      "class_type": "VAEDecode",
+      "_meta": {
+        "title": "VAE 디코드"
+      }
+    },
+    "10": {
+      "inputs": {
+        "vae_name": "FLUX\\ae.safetensors"
+      },
+      "class_type": "VAELoader",
+      "_meta": {
+        "title": "VAE 로드"
+      }
+    },
+    "13": {
+      "inputs": {
+        "noise": [
+          "25",
+          0
+        ],
+        "guider": [
+          "22",
+          0
+        ],
+        "sampler": [
+          "16",
+          0
+        ],
+        "sigmas": [
+          "17",
+          0
+        ],
+        "latent_image": [
+          "27",
+          0
+        ]
+      },
+      "class_type": "SamplerCustomAdvanced",
+      "_meta": {
+        "title": "고급 샘플러"
+      }
+    },
+    "16": {
+      "inputs": {
+        "sampler_name": "euler"
+      },
+      "class_type": "KSamplerSelect",
+      "_meta": {
+        "title": "K샘플러 선택"
+      }
+    },
+    "17": {
+      "inputs": {
+        "scheduler": "simple",
+        "steps": 20,
+        "denoise": 1,
+        "model": [
+          "30",
+          0
+        ]
+      },
+      "class_type": "BasicScheduler",
+      "_meta": {
+        "title": "기본 스케줄러"
+      }
+    },
+    "22": {
+      "inputs": {
+        "model": [
+          "30",
+          0
+        ],
+        "conditioning": [
+          "26",
+          0
+        ]
+      },
+      "class_type": "BasicGuider",
+      "_meta": {
+        "title": "기본 가이드"
+      }
+    },
+    "25": {
+      "inputs": {
+        "noise_seed": 396029770480423
+      },
+      "class_type": "RandomNoise",
+      "_meta": {
+        "title": "무작위 노이즈"
+      }
+    },
+    "26": {
+      "inputs": {
+        "guidance": 3.5,
+        "conditioning": [
+          "6",
+          0
+        ]
+      },
+      "class_type": "FluxGuidance",
+      "_meta": {
+        "title": "FLUX 가이드"
+      }
+    },
+    "27": {
+      "inputs": {
+        "width": 1024,
+        "height": 1024,
+        "batch_size": 1
+      },
+      "class_type": "EmptySD3LatentImage",
+      "_meta": {
+        "title": "빈 잠재 이미지 (SD3)"
+      }
+    },
+    "30": {
+      "inputs": {
+        "max_shift": 1.15,
+        "base_shift": 0.5,
+        "width": 1024,
+        "height": 1024,
+        "model": [
+          "47",
+          0
+        ]
+      },
+      "class_type": "ModelSamplingFlux",
+      "_meta": {
+        "title": "모델 샘플링 (FLUX)"
+      }
+    },
+    "44": {
+      "inputs": {
+        "clip_name": "clip_l.safetensors"
+      },
+      "class_type": "CLIPLoader",
+      "_meta": {
+        "title": "CLIP 로드"
+      }
+    },
+    "47": {
+      "inputs": {
+        "unet_name": "flux1-dev.safetensors"
+      },
+      "class_type": "UNETLoader",
+      "_meta": {
+        "title": "UNET 로드"
+      }
+    },
+    "48": {
+      "inputs": {
+        "filename_prefix": "Nunchaku_FLUX",
+        "images": [
+          "8",
+          0
+        ]
+      },
+      "class_type": "SaveImage",
+      "_meta": {
+        "title": "이미지 저장"
+      }
+    }
+  },
+  "input_parameters": {
+    "prompt": {
+      "node_id": "6",
+      "input_name": "text",
+      "type": "string",
+      "description": "Text prompt for image generation",
+      "required": true
+    },
+    "width": {
+      "node_id": "27",
+      "input_name": "width",
+      "type": "int",
+      "description": "Image width",
+      "default": 1024,
+      "min": 512,
+      "max": 2048
+    },
+    "height": {
+      "node_id": "27",
+      "input_name": "height",
+      "type": "int",
+      "description": "Image height",
+      "default": 1024,
+      "min": 512,
+      "max": 2048
+    },
+    "steps": {
+      "node_id": "17",
+      "input_name": "steps",
+      "type": "int",
+      "description": "Number of sampling steps",
+      "default": 20,
+      "min": 1,
+      "max": 50
+    },
+    "guidance": {
+      "node_id": "26",
+      "input_name": "guidance",
+      "type": "float",
+      "description": "Guidance scale",
+      "default": 3.5,
+      "min": 1.0,
+      "max": 10.0
+    },
+    "seed": {
+      "node_id": "25",
+      "input_name": "noise_seed",
+      "type": "int",
+      "description": "Random seed for reproducible results",
+      "default": -1
+    },
+    "denoise": {
+      "node_id": "17",
+      "input_name": "denoise",
+      "type": "float",
+      "description": "Denoising strength",
+      "default": 1.0,
+      "min": 0.0,
+      "max": 1.0
+    },
+    "batch_size": {
+      "node_id": "27",
+      "input_name": "batch_size",
+      "type": "int",
+      "description": "Number of images to generate",
+      "default": 1,
+      "min": 1,
+      "max": 4
+    }
+  },
+  "custom_nodes": [
+    "FluxGuidance",
+    "SamplerCustomAdvanced",
+    "ModelSamplingFlux",
+    "EmptySD3LatentImage"
+  ],
+  "required_models": [
+    "flux1-dev.safetensors",
+    "clip_l.safetensors",
+    "ae.safetensors"
+  ],
+  "created_by": "user",
+  "tags": ["flux", "nunchaku", "custom", "txt2img", "advanced"],
+  "is_active": true,
+  "version": "1.0.0",
+  "created_at": "2024-07-05T00:00:00Z",
+  "updated_at": "2024-07-05T00:00:00Z"
+}

@@ -1,0 +1,142 @@
+{
+  "id": "basic_txt2img",
+  "name": "기본 텍스트-이미지 생성",
+  "description": "기본적인 텍스트에서 이미지를 생성하는 워크플로우",
+  "category": "txt2img",
+  "workflow_json": {
+    "3": {
+      "inputs": {
+        "seed": -1,
+        "steps": 20,
+        "cfg": 7.0,
+        "sampler_name": "euler",
+        "scheduler": "normal",
+        "denoise": 1,
+        "model": [
+          "4",
+          0
+        ],
+        "positive": [
+          "6",
+          0
+        ],
+        "negative": [
+          "7",
+          0
+        ],
+        "latent_image": [
+          "5",
+          0
+        ]
+      },
+      "class_type": "KSampler"
+    },
+    "4": {
+      "inputs": {
+        "ckpt_name": "sd_xl_base_1.0.safetensors"
+      },
+      "class_type": "CheckpointLoaderSimple"
+    },
+    "5": {
+      "inputs": {
+        "width": 1024,
+        "height": 1024,
+        "batch_size": 1
+      },
+      "class_type": "EmptyLatentImage"
+    },
+    "6": {
+      "inputs": {
+        "text": "",
+        "clip": [
+          "4",
+          1
+        ]
+      },
+      "class_type": "CLIPTextEncode"
+    },
+    "7": {
+      "inputs": {
+        "text": "low quality, blurry",
+        "clip": [
+          "4",
+          1
+        ]
+      },
+      "class_type": "CLIPTextEncode"
+    },
+    "8": {
+      "inputs": {
+        "samples": [
+          "3",
+          0
+        ],
+        "vae": [
+          "4",
+          2
+        ]
+      },
+      "class_type": "VAEDecode"
+    },
+    "9": {
+      "inputs": {
+        "filename_prefix": "ComfyUI",
+        "images": [
+          "8",
+          0
+        ]
+      },
+      "class_type": "SaveImage"
+    }
+  },
+  "input_parameters": {
+    "prompt": {
+      "node_id": 6,
+      "input_name": "text",
+      "type": "string",
+      "description": "생성할 이미지 설명"
+    },
+    "negative_prompt": {
+      "node_id": 7,
+      "input_name": "text",
+      "type": "string",
+      "description": "원하지 않는 요소"
+    },
+    "width": {
+      "node_id": 5,
+      "input_name": "width",
+      "type": "int",
+      "description": "이미지 너비"
+    },
+    "height": {
+      "node_id": 5,
+      "input_name": "height",
+      "type": "int",
+      "description": "이미지 높이"
+    },
+    "steps": {
+      "node_id": 3,
+      "input_name": "steps",
+      "type": "int",
+      "description": "생성 단계 수"
+    },
+    "cfg_scale": {
+      "node_id": 3,
+      "input_name": "cfg",
+      "type": "float",
+      "description": "CFG 스케일"
+    },
+    "seed": {
+      "node_id": 3,
+      "input_name": "seed",
+      "type": "int",
+      "description": "시드값"
+    }
+  },
+  "created_by": "system",
+  "tags": [
+    "기본",
+    "텍스트-이미지"
+  ],
+  "is_active": true
+}
