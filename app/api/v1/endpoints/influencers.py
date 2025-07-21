@@ -1781,29 +1781,38 @@ async def upload_base_voice(
     except Exception as e:
         raise HTTPException(status_code=400, detail="잘못된 파일 데이터 형식입니다")
     
-    file_size = len(contents)
+    # 오디오를 WAV로 변환
+    from app.utils.audio_converter import convert_to_wav, validate_audio_for_tts
+    try:
+        wav_data, wav_filename = convert_to_wav(contents, request.file_name)
+        
+        # TTS용 검증
+        is_valid, validation_message = validate_audio_for_tts(wav_data)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=validation_message)
+            
+        contents = wav_data  # WAV 데이터로 교체
+        file_size = len(contents)
+        
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     
     # 파일 크기 검증 (10MB)
     if file_size > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="파일 크기는 10MB 이하여야 합니다")
     
-    # 파일 확장자 추출
-    file_extension = request.file_name.split('.')[-1].lower()
-    if file_extension not in ['mp3', 'wav', 'm4a', 'ogg', 'flac']:
-        raise HTTPException(status_code=400, detail="지원하지 않는 오디오 형식입니다")
-    
-    # S3 키 생성 (audio_base/influencer_id/base.extension)
-    s3_key = f"audio_base/{influencer_id}/base.{file_extension}"
+    # S3 키 생성 (audio_base/influencer_id/base.wav)
+    s3_key = f"audio_base/{influencer_id}/base.wav"
     
     # 임시 파일로 저장
     import tempfile
-    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_extension}") as tmp_file:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
         tmp_file.write(contents)
         tmp_file_path = tmp_file.name
     
     try:
-        # S3에 업로드
-        s3_url = s3_service.upload_file(tmp_file_path, s3_key, content_type=request.file_type)
+        # S3에 업로드 (WAV 파일로)
+        s3_url = s3_service.upload_file(tmp_file_path, s3_key, content_type="audio/wav")
         if not s3_url:
             raise HTTPException(status_code=500, detail="S3 업로드 실패")
         
@@ -1814,9 +1823,9 @@ async def upload_base_voice(
         
         if existing_voice:
             # 기존 음성 업데이트
-            existing_voice.file_name = request.file_name
+            existing_voice.file_name = wav_filename
             existing_voice.file_size = file_size
-            existing_voice.file_type = request.file_type
+            existing_voice.file_type = "audio/wav"
             existing_voice.s3_url = s3_url
             existing_voice.s3_key = s3_key
             existing_voice.updated_at = datetime.utcnow()
@@ -1824,9 +1833,9 @@ async def upload_base_voice(
             # 새로운 베이스 음성 생성
             new_voice = VoiceBase(
                 influencer_id=influencer.influencer_id,
-                file_name=request.file_name,
+                file_name=wav_filename,
                 file_size=file_size,
-                file_type=request.file_type,
+                file_type="audio/wav",
                 s3_url=s3_url,
                 s3_key=s3_key
             )
@@ -1835,10 +1844,11 @@ async def upload_base_voice(
         db.commit()
         
         return {
-            "message": "베이스 음성이 성공적으로 업로드되었습니다",
+            "message": "베이스 음성이 성공적으로 업로드되었습니다 (WAV로 변환됨)",
             "s3_url": s3_url,
-            "file_name": request.file_name,
-            "file_size": file_size
+            "file_name": wav_filename,
+            "file_size": file_size,
+            "original_filename": request.file_name
         }
         
     except Exception as e:
@@ -1921,10 +1931,9 @@ async def get_generated_voices(
     if not influencer:
         raise HTTPException(status_code=404, detail="인플루언서를 찾을 수 없습니다")
     
-    # 생성된 음성 목록 조회 (삭제되지 않은 것만)
+    # 생성된 음성 목록 조회
     voices = db.query(GeneratedVoice).filter(
-        GeneratedVoice.influencer_id == influencer.influencer_id,
-        GeneratedVoice.is_deleted == False
+        GeneratedVoice.influencer_id == influencer.influencer_id
     ).order_by(GeneratedVoice.created_at.desc()).offset(skip).limit(limit).all()
     
     # 각 음성에 대해 presigned URL 생성
@@ -1940,10 +1949,14 @@ async def get_generated_voices(
         result.append({
             "id": str(voice.id),
             "text": voice.text,
-            "s3_url": voice_url,
+            "url": voice_url,  # 프론트엔드와 일치하도록 url로 변경
+            "s3_url": voice_url,  # 호환성을 위해 유지
             "duration": voice.duration,
             "file_size": voice.file_size,
-            "created_at": voice.created_at.isoformat()
+            "status": voice.status if hasattr(voice, 'status') else "completed",
+            "task_id": voice.task_id if hasattr(voice, 'task_id') else None,
+            "createdAt": voice.created_at.isoformat(),  # 프론트엔드 형식
+            "created_at": voice.created_at.isoformat()  # 호환성을 위해 유지
         })
     
     return result
@@ -1954,8 +1967,9 @@ async def delete_generated_voice(
     voice_id: int,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
+    s3_service: S3Service = Depends(get_s3_service),
 ):
-    """생성된 음성 삭제 (소프트 삭제)"""
+    """생성된 음성 삭제 (소프트 삭제 + S3 파일 삭제)"""
     user_id = current_user.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found")
@@ -1977,9 +1991,71 @@ async def delete_generated_voice(
     if not influencer:
         raise HTTPException(status_code=403, detail="권한이 없습니다")
     
-    # 소프트 삭제
-    voice.is_deleted = True
+    # S3에서 파일 삭제
+    if voice.s3_key and s3_service.is_available():
+        try:
+            s3_service.delete_file(voice.s3_key)
+            logger.info(f"S3 파일 삭제 성공: {voice.s3_key}")
+        except Exception as e:
+            logger.error(f"S3 파일 삭제 실패: {voice.s3_key}, 에러: {str(e)}")
+            # S3 삭제 실패해도 DB 삭제는 진행
+    
+    # 데이터베이스에서 완전 삭제
+    db.delete(voice)
     db.commit()
     
+    logger.info(f"음성 완전 삭제 완료: voice_id={voice_id}")
+    
     return {"message": "음성이 삭제되었습니다"}
+
+
+@router.get("/voices/{voice_id}/download")
+async def get_voice_download_url(
+    voice_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+    s3_service: S3Service = Depends(get_s3_service),
+):
+    """음성 다운로드를 위한 presigned URL 생성"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID not found")
+    
+    # 음성 조회
+    voice = db.query(GeneratedVoice).filter(
+        GeneratedVoice.id == voice_id
+    ).first()
+    
+    if not voice:
+        raise HTTPException(status_code=404, detail="음성을 찾을 수 없습니다")
+    
+    # 소유자 확인
+    influencer = db.query(AIInfluencer).filter(
+        AIInfluencer.influencer_id == voice.influencer_id,
+        AIInfluencer.user_id == user_id
+    ).first()
+    
+    if not influencer:
+        raise HTTPException(status_code=403, detail="권한이 없습니다")
+    
+    # 다운로드용 presigned URL 생성
+    if voice.s3_key and s3_service.is_available():
+        try:
+            # Content-Disposition 헤더를 포함한 presigned URL 생성
+            presigned_url = s3_service.s3_client.generate_presigned_url(
+                'get_object',
+                Params={
+                    'Bucket': s3_service.bucket_name,
+                    'Key': voice.s3_key,
+                    'ResponseContentDisposition': f'attachment; filename="voice_{voice_id}.mp3"',
+                    'ResponseContentType': 'audio/mpeg'
+                },
+                ExpiresIn=3600  # 1시간 유효
+            )
+            return {"download_url": presigned_url}
+        except Exception as e:
+            logger.error(f"다운로드 URL 생성 실패: {str(e)}")
+            raise HTTPException(status_code=500, detail="다운로드 URL 생성에 실패했습니다")
+    else:
+        raise HTTPException(status_code=404, detail="음성 파일을 찾을 수 없습니다")
 
