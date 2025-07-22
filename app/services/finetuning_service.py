@@ -16,6 +16,8 @@ from enum import Enum
 from app.services.s3_service import get_s3_service
 from app.services.vllm_client import get_vllm_client, vllm_health_check
 from app.core.encryption import decrypt_sensitive_data
+from app.services.hf_token_resolver import get_token_for_influencer
+from app.core.config import settings
 from app.models.influencer import AIInfluencer
 from app.utils.finetuning_utils import (
     create_system_message,
@@ -94,7 +96,7 @@ class InfluencerFineTuningService:
         """한글 이름을 영문으로 변환 (공통 유틸리티 사용)"""
         return format_model_name_for_korean(korean_name)
 
-    def _get_hf_info_from_influencer(self, influencer_data, db) -> tuple[str, str]:
+    async def _get_hf_info_from_influencer(self, influencer_data, db) -> tuple[str, str]:
         """
         인플루언서의 그룹 ID를 통해 허깅페이스 토큰과 사용자명 정보 가져오기
         Args:
@@ -106,59 +108,22 @@ class InfluencerFineTuningService:
         logger.debug(
             f"_get_hf_info_from_influencer 호출됨. influencer_data 타입: {type(influencer_data)}"
         )
-        if isinstance(influencer_data, dict):
-            logger.debug(f"influencer_data (dict): {influencer_data}")
-        else:
-            logger.debug(
-                f"influencer_data (object): {influencer_data.__dict__ if hasattr(influencer_data, '__dict__') else influencer_data}"
-            )
 
         try:
-            # 인플루언서의 그룹 ID 추출
-            group_id = None
-            if hasattr(influencer_data, "group_id"):
-                group_id = influencer_data.group_id
-            elif isinstance(influencer_data, dict):
-                group_id = influencer_data.get("group_id")
-
-            logger.debug(f"추출된 group_id: {group_id}")
-
-            if not group_id:
-                raise Exception("인플루언서의 그룹 ID를 찾을 수 없습니다")
-
-            # 해당 그룹의 허깅페이스 토큰 조회 (최신 생성순으로 정렬)
-            from app.models.user import HFTokenManage
-
-            hf_token_manage = (
-                db.query(HFTokenManage)
-                .filter(HFTokenManage.group_id == group_id)
-                .order_by(HFTokenManage.created_at.desc())
-                .first()
-            )
-
-            if hf_token_manage:
-                logger.debug(
-                    f"HFTokenManage 객체 발견. 닉네임: {hf_token_manage.hf_token_nickname}, 사용자명: {hf_token_manage.hf_user_name}"
+            # 중앙화된 토큰 리졸버 사용
+            hf_token, hf_username = await get_token_for_influencer(influencer_data, db)
+            
+            if hf_token and hf_username:
+                logger.info(
+                    f"✅ 토큰 조회 성공: {influencer_data.influencer_name if hasattr(influencer_data, 'influencer_name') else 'Unknown'}"
                 )
-                # 암호화된 토큰 복호화
-                try:
-                    decrypted_token = decrypt_sensitive_data(
-                        hf_token_manage.hf_token_value
-                    )
-                    logger.info(
-                        f"그룹 {group_id}의 허깅페이스 토큰 조회 성공: {hf_token_manage.hf_token_nickname}"
-                    )
-                    return decrypted_token, hf_token_manage.hf_user_name
-                except Exception as decrypt_e:
-                    logger.error(
-                        f"허깅페이스 토큰 복호화 실패: {decrypt_e}", exc_info=True
-                    )
-                    raise Exception(f"허깅페이스 토큰 복호화 실패: {decrypt_e}")
+                return hf_token, hf_username
             else:
+                # 토큰이 없는 경우
+                group_id = getattr(influencer_data, 'group_id', 'Unknown')
                 logger.warning(
                     f"그룹 {group_id}에 등록된 허깅페이스 토큰을 찾을 수 없습니다."
                 )
-                # 그룹에 토큰이 없는 경우
                 raise Exception(
                     f"그룹 {group_id}에 등록된 허깅페이스 토큰이 없습니다. 관리자에게 문의하여 토큰을 등록해주세요."
                 )
@@ -510,9 +475,16 @@ class InfluencerFineTuningService:
             logger.info(f"파인튜닝 시작: {hf_repo_id}")
 
             # VLLM 서버 상태 확인
-            if not await vllm_health_check():
-                logger.error("VLLM 서버가 비활성화되었거나 연결할 수 없습니다.")
+            logger.info(f"🔍 VLLM 서버 상태 확인 중... (URL: {settings.VLLM_BASE_URL})")
+            health_status = await vllm_health_check()
+            if not health_status:
+                logger.error(f"❌ VLLM 서버가 비활성화되었거나 연결할 수 없습니다. URL: {settings.VLLM_BASE_URL}")
+                logger.error(f"   - VLLM_ENABLED: {settings.VLLM_ENABLED}")
+                logger.error(f"   - VLLM_HOST: {getattr(settings, 'VLLM_HOST', 'N/A')}")
+                logger.error(f"   - VLLM_PORT: {getattr(settings, 'VLLM_PORT', 'N/A')}")
                 return None
+            else:
+                logger.info("✅ VLLM 서버 연결 성공")
 
             try:
                 logger.info(f"🚀 VLLM 서버에서 파인튜닝 실행: {hf_repo_id}")
@@ -596,7 +568,7 @@ class InfluencerFineTuningService:
     #             logger.error(f"VLLM 파인튜닝 상태 확인 실패: {e}")
     #             return None
 
-    def start_finetuning_task(
+    async def start_finetuning_task(
         self,
         influencer_id: str,
         qa_task_id: str,
@@ -628,7 +600,7 @@ class InfluencerFineTuningService:
         # 허깅페이스 토큰 정보 가져오기
         try:
             if db:
-                _, hf_username = self._get_hf_info_from_influencer(influencer_data, db)
+                _, hf_username = await self._get_hf_info_from_influencer(influencer_data, db)
             else:
                 hf_username = "skn-team"
         except Exception as e:
@@ -855,23 +827,26 @@ class InfluencerFineTuningService:
             성공 여부
         """
         try:
-            # 인플루언서 정보 가져오기
-            from app.services.influencers.crud import get_influencer_by_id
-
-            user_id = "system"  # 시스템 작업으로 처리
-            influencer_data = get_influencer_by_id(db, user_id, influencer_id)
+            # 인플루언서 정보 가져오기 (시스템 작업이므로 권한 체크 없이 직접 조회)
+            from app.models.influencer import AIInfluencer
+            
+            influencer_data = (
+                db.query(AIInfluencer)
+                .filter(AIInfluencer.influencer_id == influencer_id)
+                .first()
+            )
 
             if not influencer_data:
                 logger.error(f"인플루언서를 찾을 수 없습니다: {influencer_id}")
                 return False
 
             # 허깅페이스 토큰 정보 가져오기
-            hf_token, hf_username = self._get_hf_info_from_influencer(
+            hf_token, hf_username = await self._get_hf_info_from_influencer(
                 influencer_data, db
             )
 
             # 파인튜닝 작업 시작 (모델 인스턴스 직접 사용)
-            ft_task_id = self.start_finetuning_task(
+            ft_task_id = await self.start_finetuning_task(
                 influencer_id=influencer_id,
                 qa_task_id=f"startup_restart_{influencer_id}",
                 s3_qa_url=s3_qa_file_url,

@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 from app.core.social_auth import SocialAuthService
 from app.models.influencer import AIInfluencer
 from app.models.user import User
+from app.utils.auth_helpers import AuthHelper
+from app.utils.error_handlers import handle_api_errors
 
 
 class InstagramConnectRequest(BaseModel):
@@ -13,46 +15,10 @@ class InstagramConnectRequest(BaseModel):
     redirect_uri: str
 
 
-def get_user_with_teams(db: Session, user_id: str):
-    """사용자 정보와 팀 정보를 조회"""
-    from sqlalchemy.orm import joinedload
-    
-    user = db.query(User).options(joinedload(User.teams)).filter(User.user_id == user_id).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found"
-        )
-    return user
-
-
-def get_influencer_with_permission(db: Session, user_id: str, influencer_id: str):
-    """권한 확인 후 인플루언서 조회"""
-    user = get_user_with_teams(db, user_id)
-    user_group_ids = [team.group_id for team in user.teams]
-    
-    query = db.query(AIInfluencer).filter(AIInfluencer.influencer_id == influencer_id)
-    if user_group_ids:
-        query = query.filter(
-            (AIInfluencer.group_id.in_(user_group_ids)) |
-            (AIInfluencer.user_id == user_id)
-        )
-    else:
-        query = query.filter(AIInfluencer.user_id == user_id)
-    
-    influencer = query.first()
-    if not influencer:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Influencer not found or access denied"
-        )
-    
-    return influencer
-
-
+@handle_api_errors(operation="Instagram account connection")
 async def connect_instagram_account(db: Session, user_id: str, influencer_id: str, request: InstagramConnectRequest):
     """AI 인플루언서에 Instagram 비즈니스 계정 연동"""
-    influencer = get_influencer_with_permission(db, user_id, influencer_id)
+    influencer = AuthHelper.check_influencer_permission(db, user_id, influencer_id)
     
     # Instagram OAuth 토큰 교환
     social_auth = SocialAuthService()
@@ -136,7 +102,7 @@ async def connect_instagram_account(db: Session, user_id: str, influencer_id: st
 
 def disconnect_instagram_account(db: Session, user_id: str, influencer_id: str):
     """AI 인플루언서에서 Instagram 비즈니스 계정 연동 해제"""
-    influencer = get_influencer_with_permission(db, user_id, influencer_id)
+    influencer = AuthHelper.check_influencer_permission(db, user_id, influencer_id)
     
     # Instagram 연동 정보 제거 (모든 필드)
     influencer.instagram_id = None
@@ -155,7 +121,7 @@ def disconnect_instagram_account(db: Session, user_id: str, influencer_id: str):
 
 async def get_instagram_status(db: Session, user_id: str, influencer_id: str):
     """AI 인플루언서의 Instagram 연동 상태 조회"""
-    influencer = get_influencer_with_permission(db, user_id, influencer_id)
+    influencer = AuthHelper.check_influencer_permission(db, user_id, influencer_id)
     
     # 토큰 만료 확인
     token_expired = False
@@ -200,18 +166,19 @@ async def _load_vllm_adapter_for_influencer(influencer, db: Session):
     
     try:
         # vLLM 클라이언트 및 어댑터 로드 함수 import
-        from app.services.vllm_operations import vllm_load_adapter_if_needed, get_hf_token_from_influencer_group
+        from app.services.vllm_client import vllm_load_adapter_if_needed
+        from app.services.hf_token_resolver import get_token_for_influencer
         
         logger.info(f"📲 {influencer.influencer_name}: Instagram 연동 완료, vLLM 어댑터 로드 시작")
         logger.info(f"   - 모델 리포지토리: {influencer.influencer_model_repo}")
         
         # 허깅페이스 토큰 조회
-        hf_token = await get_hf_token_from_influencer_group(influencer, db)
+        hf_token, hf_username = await get_token_for_influencer(influencer, db)
         
         # 어댑터 로드 요청
         adapter_loaded = await vllm_load_adapter_if_needed(
-            model_id=influencer.influencer_model_repo,
-            hf_repo_name=influencer.influencer_model_repo,
+            model_id=str(influencer.influencer_id),  # 인플루언서 ID를 어댑터 식별자로 사용
+            hf_repo_name=influencer.influencer_model_repo,  # 실제 HuggingFace 레포지토리 경로
             hf_token=hf_token
         )
         

@@ -5,6 +5,7 @@ from app.database import get_db
 from app.models.user import HFTokenManage
 from app.services.vllm_client import VLLMWebSocketClient, VLLMClient, get_vllm_client, vllm_health_check
 from app.core.encryption import decrypt_sensitive_data
+from app.services.hf_token_resolver import get_token_by_group
 import json
 import logging
 import base64
@@ -59,7 +60,9 @@ async def chatbot(websocket: WebSocket, lora_repo: str, group_id: int = Query(..
         # VLLM 서버에 어댑터 로드
         vllm_client = await get_vllm_client()
         try:
-            await vllm_client.load_adapter(lora_repo_decoded, lora_repo_decoded, hf_token)
+            # model_id를 생성 (lora_repo를 기반으로)
+            model_id = lora_repo_decoded.replace("/", "_")  # 슬래시를 언더스코어로 변환
+            await vllm_client.load_adapter(model_id=model_id, hf_repo_name=lora_repo_decoded, hf_token=hf_token)
             logger.info(f"[WS] VLLM 어댑터 로드 완료: {lora_repo_decoded}")
         except Exception as e:
             logger.error(f"[WS] VLLM 어댑터 로드 실패: {e}")
@@ -87,7 +90,7 @@ async def chatbot(websocket: WebSocket, lora_repo: str, group_id: int = Query(..
                         user_message=data,
                         system_message=system_prompt,
                         influencer_name=str(influencer.influencer_name) if influencer else "한세나",
-                        model_id=lora_repo_decoded,
+                        model_id=model_id,  # 이전에 생성한 model_id 사용
                         max_new_tokens=512,
                         temperature=0.7
                     ):
@@ -136,21 +139,9 @@ async def chatbot(websocket: WebSocket, lora_repo: str, group_id: int = Query(..
             pass
 
 async def _get_hf_token_by_group(group_id: int, db: Session) -> str | None:
-    """그룹 ID로 HF 토큰 가져오기"""
-    try:
-        hf_token_manage = db.query(HFTokenManage).filter(
-            HFTokenManage.group_id == group_id
-        ).order_by(HFTokenManage.created_at.desc()).first()
-        
-        if hf_token_manage:
-            return decrypt_sensitive_data(str(hf_token_manage.hf_token_value))
-        else:
-            logger.warning(f"그룹 {group_id}에 등록된 HF 토큰이 없습니다.")
-            return None
-            
-    except Exception as e:
-        logger.error(f"HF 토큰 조회 실패: {e}")
-        return None
+    """그룹 ID로 HF 토큰 가져오기 (하위 호환성을 위해 유지)"""
+    hf_token, _ = await get_token_by_group(group_id, db)
+    return hf_token
 
 @router.post("/load_model")
 async def model_load(req: ModelLoadRequest, db: Session = Depends(get_db)):
@@ -168,7 +159,9 @@ async def model_load(req: ModelLoadRequest, db: Session = Depends(get_db)):
         # VLLM 서버에 어댑터 로드
         try:
             vllm_client = await get_vllm_client()
-            await vllm_client.load_adapter(req.lora_repo, req.lora_repo, hf_token)
+            # model_id를 생성 (lora_repo를 기반으로)
+            model_id = req.lora_repo.replace("/", "_")  # 슬래시를 언더스코어로 변환
+            await vllm_client.load_adapter(model_id=model_id, hf_repo_name=req.lora_repo, hf_token=hf_token)
             logger.info(f"[MODEL LOAD API] VLLM 어댑터 로드 성공: {req.lora_repo}")
             return {
                 "success": True, 

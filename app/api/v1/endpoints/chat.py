@@ -117,7 +117,7 @@ async def chatbot_chat(
                     
                     # 어댑터 로드 (chatbot.py와 동일한 방식)
                     try:
-                        await vllm_client.load_adapter(model_id, hf_repo_name=influencer.influencer_model_repo, hf_token=hf_token)
+                        await vllm_client.load_adapter(model_id=model_id, hf_repo_name=influencer.influencer_model_repo, hf_token=hf_token)
                         logger.info(f"✅ VLLM 어댑터 로드 완료: {model_id}")
                     except Exception as e:
                         logger.warning(f"⚠️ 어댑터 로드 실패, 기본 모델 사용: {e}")

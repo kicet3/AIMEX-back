@@ -66,6 +66,7 @@ class HFTokenManageUpdate(BaseModel):
     hf_token_nickname: Optional[str] = None
     hf_user_name: Optional[str] = None
     hf_token_value: Optional[str] = None
+    is_default: Optional[bool] = None
     
     @validator('hf_token_nickname')
     def validate_nickname(cls, v):
@@ -108,6 +109,7 @@ class HFTokenManage(HFTokenManageBase, BaseSchema):
     """허깅페이스 토큰 관리 응답 스키마"""
     hf_manage_id: str
     group_id: Optional[int] = None  # 할당되지 않은 토큰의 경우 None
+    is_default: bool = False
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     

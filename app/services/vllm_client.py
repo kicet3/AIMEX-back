@@ -6,7 +6,7 @@ FastAPI 백엔드에서 VLLM 서버로 요청을 라우팅하는 클라이언트
 import asyncio
 import json
 import logging
-from re import A
+import os
 import httpx
 import websockets
 from typing import Optional, Dict, List, Any, AsyncIterator
@@ -55,10 +55,27 @@ class VLLMClient:
     async def health_check(self) -> bool:
         """VLLM 서버 상태 확인"""
         try:
+            logger.info(f"🔍 VLLM 서버 health check 시작: {self.config.base_url}")
             response = await self.client.get("/")
+            logger.info(f"✅ VLLM 서버 응답 성공: 상태 코드 {response.status_code}")
+            if response.status_code != 200:
+                logger.warning(f"⚠️ VLLM 서버가 200이 아닌 상태 코드 반환: {response.status_code}")
+                logger.warning(f"   - 응답 내용: {response.text[:500]}")
             return response.status_code == 200
+        except httpx.ConnectError as e:
+            logger.error(f"❌ VLLM 서버 연결 실패 (ConnectError): {self.config.base_url}")
+            logger.error(f"   - 상세 오류: {str(e)}")
+            logger.error(f"   - 환경 변수 확인: VLLM_ENABLED={os.getenv('VLLM_ENABLED')}, VLLM_SERVER_URL={os.getenv('VLLM_SERVER_URL')}")
+            return False
+        except httpx.TimeoutException as e:
+            logger.error(f"❌ VLLM 서버 연결 시간 초과 (TimeoutException): {self.config.base_url}")
+            logger.error(f"   - 시간 초과 설정: {self.config.timeout}초")
+            return False
         except Exception as e:
-            logger.error(f"VLLM 서버 상태 확인 실패: {e}")
+            logger.error(f"❌ VLLM 서버 상태 확인 실패 (기타 오류): {type(e).__name__}")
+            logger.error(f"   - 상세 오류: {str(e)}")
+            import traceback
+            logger.error(f"   - 스택 트레이스:\n{traceback.format_exc()}")
             return False
     
     async def get_stats(self) -> Dict[str, Any]:
@@ -316,24 +333,32 @@ class VLLMClient:
             raise VLLMClientError(f"음성 생성 실패: {e}")
 
     async def generate_qa_for_character(self, character_data: Dict[str, Any]) -> Dict[str, Any]:
-        """캐릭터에 대한 QA 생성 (vLLM 서버의 /speech/generate_qa 엔드포인트 사용)"""
+        """캐릭터에 대한 QA 생성 (vLLM 서버의 /speech/generate_qa_fast 엔드포인트 사용)"""
         try:
-            # VLLMCharacterProfile 형식으로 변환
+            # vLLM 서버가 기대하는 형식으로 페이로드 구성 (character 키로 감싸기)
             payload = {
-                "name": character_data.get("name", ""),
-                "description": character_data.get("description", ""),
-                "age_range": character_data.get("age_range", ""),
-                "gender": character_data.get("gender", "NON_BINARY"),
-                "personality": character_data.get("personality", ""),
-                "mbti": character_data.get("mbti")
+                "character": {
+                    "name": character_data.get("name", ""),
+                    "description": character_data.get("description", ""),
+                    "age_range": character_data.get("age_range", ""),
+                    "gender": character_data.get("gender", "NON_BINARY"),
+                    "personality": character_data.get("personality", ""),
+                    "mbti": character_data.get("mbti")
+                }
             }
             
-            logger.info(f"vLLM 서버로 QA 생성 요청: {payload}")
-            response = await self.client.post("/speech/generate_qa", json=payload)
+            logger.info(f"vLLM 서버로 QA 생성 요청 (고속 엔드포인트): {payload}")
+            # 올바른 엔드포인트 사용 (/speech/generate_qa_fast)
+            response = await self.client.post("/speech/generate_qa_fast", json=payload)
             response.raise_for_status()
             
             result = response.json()
             logger.debug(f"✅ QA 생성 성공: {character_data.get('name', 'Unknown')}")
+            
+            # 생성 시간 정보가 있으면 로깅
+            if 'generation_time_seconds' in result:
+                logger.info(f"⚡ 생성 소요 시간: {result['generation_time_seconds']:.2f}초")
+            
             return result
             
         except Exception as e:

@@ -56,10 +56,9 @@ async def process_single_influencer(
         adapter_repo = influencer_info.influencer_model_repo
         
         # URL 형태의 레포지토리를 Hugging Face 레포지토리 형식으로 변환
-        if adapter_repo.startswith("https://huggingface.co/models/"):
-            adapter_repo = adapter_repo.replace("https://huggingface.co/models/", "")
-        elif adapter_repo.startswith("https://huggingface.co/"):
-            adapter_repo = adapter_repo.replace("https://huggingface.co/", "")
+        # 허깅페이스 URL에서 레포 경로만 추출
+        from app.utils.hf_utils import extract_hf_repo_path
+        adapter_repo = extract_hf_repo_path(adapter_repo)
         
         # 어댑터 레포지토리 유효성 검사
         if adapter_repo in ["sample1", "sample2", "sample3"] or "sample" in adapter_repo or not adapter_repo.strip():

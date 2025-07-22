@@ -22,6 +22,7 @@ from app.schemas.instagram import (
 from app.core.instagram_service import InstagramService
 from app.core.security import get_current_user
 from app.services.vllm_client import vllm_generate_response, vllm_health_check, vllm_load_adapter_if_needed
+from app.services.hf_token_resolver import get_token_for_influencer
 
 router = APIRouter()
 instagram_service = InstagramService()
@@ -485,7 +486,7 @@ async def generate_ai_response(message_text: str, influencer: AIInfluencer, send
                 model_id = influencer.influencer_model_repo
                 
                 # 필요시 어댑터 로드
-                hf_token = await get_hf_token_from_influencer_group(influencer, db)
+                hf_token, hf_username = await get_token_for_influencer(influencer, db)
                 
                 adapter_loaded = await vllm_load_adapter_if_needed(
                     model_id=model_id,
@@ -533,32 +534,6 @@ async def generate_ai_response(message_text: str, influencer: AIInfluencer, send
         return f"안녕하세요! {influencer.influencer_name}입니다! 😅 죄송해요, 지금 응답을 생성하는 중에 문제가 생겼어요. 다시 한 번 말씀해주시겠어요?"
 
 
-async def get_hf_token_from_influencer_group(influencer: AIInfluencer, db: Session) -> str:
-    """인플루언서의 그룹에서 허깅페이스 토큰 가져오기"""
-    try:
-        from app.models.user import HFTokenManage
-        from app.core.encryption import decrypt_sensitive_data
-        
-        logger.info(f"🔍 그룹 ID {influencer.group_id}의 허깅페이스 토큰 조회 중...")
-        
-        # 해당 그룹의 허깅페이스 토큰 조회 (최신 생성순으로 정렬)
-        hf_token_manage = db.query(HFTokenManage).filter(
-            HFTokenManage.group_id == influencer.group_id
-        ).order_by(HFTokenManage.created_at.desc()).first()
-        
-        if not hf_token_manage:
-            logger.warning(f"⚠️ 그룹 ID {influencer.group_id}에 대한 허깅페이스 토큰을 찾을 수 없습니다.")
-            return None
-        
-        # 암호화된 토큰 복호화
-        decrypted_token = decrypt_sensitive_data(hf_token_manage.hf_token_value)
-        logger.info(f"✅ 허깅페이스 토큰 조회 성공 (사용자: {hf_token_manage.hf_user_name})")
-        
-        return decrypted_token
-        
-    except Exception as e:
-        logger.error(f"❌ 허깅페이스 토큰 조회 실패: {str(e)}")
-        return None
 
 async def send_instagram_dm(recipient_id: str, message_text: str, access_token: str) -> bool:
     """인스타그램 DM 전송"""

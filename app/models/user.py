@@ -93,6 +93,9 @@ class HFTokenManage(Base, TimestampMixin):
     hf_user_name = Column(
         String(50), nullable=False, comment="허깅페이스 계정 사용자 이름"
     )
+    is_default = Column(
+        Boolean, nullable=False, default=False, comment="그룹의 기본 토큰 여부"
+    )
 
     # 관계
     ai_influencers = relationship("AIInfluencer", back_populates="hf_token")

@@ -1031,11 +1031,15 @@ async def handle_finetuning_webhook(
             )
 
         if webhook_data.status == "completed":
+            # 허깅페이스 URL에서 레포 경로만 추출
+            from app.utils.hf_utils import extract_hf_repo_path
+            hf_repo_path = extract_hf_repo_path(webhook_data.hf_model_url)
+            
             batch_key_entry.status = QAGenerationStatus.FINALIZED.value
-            batch_key_entry.hf_model_url = webhook_data.hf_model_url
+            batch_key_entry.hf_model_url = hf_repo_path  # 레포 경로만 저장
             batch_key_entry.completed_at = datetime.now()
             logger.info(
-                f"✅ 파인튜닝 완료: task_id={webhook_data.task_id}, 모델 URL={webhook_data.hf_model_url}"
+                f"✅ 파인튜닝 완료: task_id={webhook_data.task_id}, 모델 레포={hf_repo_path}"
             )
 
             # AIInfluencer 모델 상태를 사용 가능으로 업데이트
@@ -1047,8 +1051,8 @@ async def handle_finetuning_webhook(
 
             if influencer:
                 influencer.learning_status = 1  # 1: 사용가능
-                if webhook_data.hf_model_url:
-                    influencer.influencer_model_repo = webhook_data.hf_model_url
+                if hf_repo_path:
+                    influencer.influencer_model_repo = hf_repo_path  # 레포 경로만 저장
                 logger.info(
                     f"✅ 인플루언서 모델 상태 업데이트 완료: influencer_id={batch_key_entry.influencer_id}, status=사용 가능"
                 )
@@ -1137,133 +1141,6 @@ async def _generate_question_for_character(client: OpenAI, character_info: str, 
     )
 
     return response.choices[0].message.content.strip()
-
-async def _generate_three_tones(client: OpenAI, character_info: str, question: str, temperature: float = 0.9) -> List[Dict[str, str]]:
-
-    """캐릭터 정보를 바탕으로 3가지 다른 말투를 생성합니다."""
-
-    conversation_examples = []
-
-    for i in range(3):
-        # 각 말투에 대한 시스템 프롬프트 생성
-        system_prompt = await _generate_system_prompt_for_tone(
-            client, character_info, i + 1
-        )
-
-        # 시스템 프롬프트를 사용해 질문에 대답
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question},
-            ],
-            max_tokens=500,
-            temperature=temperature,
-        )
-
-        generated_text = response.choices[0].message.content.strip()
-
-        # 말투 요약 생성
-        tone_summary = await _summarize_speech_style(client, system_prompt)
-
-        conversation_examples.append(
-            {
-                "title": tone_summary.get("description", f"말투 {i+1}"),
-                "example": generated_text,
-                "tone": tone_summary.get("description", f"말투 {i+1}"),
-                "hashtags": tone_summary.get("hashtags", f"#말투{i+1}"),
-                "system_prompt": system_prompt,
-            }
-        )
-
-    return conversation_examples
-
-async def _generate_system_prompt_for_tone(client: OpenAI, character_info: str, tone_variation: int) -> str:
-
-    """캐릭터 정보를 기반으로 특정 말투에 대한 시스템 프롬프트를 생성합니다."""
-
-    tone_instructions = {
-        1: "주어진 캐릭터 정보를 바탕으로 첫 번째 독특하고 창의적인 말투로 답변하세요. 캐릭터의 특성을 반영하되 예상치 못한 방식으로 표현해주세요.",
-        2: "주어진 캐릭터 정보를 바탕으로 두 번째 독특하고 창의적인 말투로 답변하세요. 첫 번째와는 완전히 다른 새로운 스타일로 표현해주세요.",
-        3: "주어진 캐릭터 정보를 바탕으로 세 번째 독특하고 창의적인 말투로 답변하세요. 앞의 두 가지와는 전혀 다른 참신한 방식으로 표현해주세요.",
-    }
-
-    tone_instruction = tone_instructions.get(
-        tone_variation, "캐릭터의 스타일을 반영한 창의적 말투를 사용하세요."
-    )
-
-    prompt = f"""
-    [요청 조건]
-    다음 캐릭터 정보에 기반하여 GPT의 말투 생성에 적합하도록 system prompt를 구성해주세요.
-    1. [캐릭터 정보]의 '설명'과 '성격'은 사용자가 입력한 의미를 유지하면서, GPT가 캐릭터의 말투를 자연스럽게 생성할 수 있도록 더 명확하고 생생하게 표현해주세요. 단, 새로운 설정을 추가하거나 의미를 바꾸면 안 돼요.
-    2. 이어서 해당 캐릭터 특성을 잘 반영한 [말투 지시사항]과 [주의사항]을 작성해주세요. 표현 방식, 말투, 감정 전달 방식 등 말투에 필요한 구체적인 특징이 드러나야 해요.
-    3. 전체 출력 포맷은 아래와 같아야 해요:
-
-    당신은 이제 캐릭터처럼 대화해야 합니다.
-
-    [캐릭터 정보]
-    {character_info}
-
-    [말투 지시사항]
-    {tone_instruction}
-
-    [주의사항]
-    {{캐릭터 특성에 따라 GPT가 직접 판단한 주의사항}}
-
-    모든 내용은 캐릭터 말투 생성을 위한 system prompt 용도로 사용되므로, 형식과 말투의 일관성을 유지해주세요.
-    """.strip()
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": "아래 캐릭터 정보로 system prompt 전체를 구성해주세요. 문장 표현은 매끄럽고 정리된 스타일로 해주세요.",
-            },
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.7,
-        max_tokens=1000,
-    )
-
-    return response.choices[0].message.content.strip()
-
-async def _summarize_speech_style(client: OpenAI, system_prompt: str) -> Dict[str, str]:
-    """말투의 시스템 프롬프트를 기반으로 그 말투의 특징을 요약합니다."""
-    system_instruction = """
-    주어진 말투의 system prompt를 기반으로 그 말투의 특징을 요약해주세요. 반드시 아래 형식을 그대로 지켜서 JSON으로 출력하세요.
-
-    형식:
-    {
-        "hashtags": "#키워드1 #키워드2 #키워드3",
-        "description": "말투 설명 (한 문장, '~말투'로 끝나야 함)"
-    }
-
-    조건:
-    1. 말투 스타일을 MZ 느낌나게 키워드 3개를 생성해 해시태그 형식으로 작성해 주세요.
-    2. 말투 스타일을 한 문장으로 요약해주세요. 반드시 '말투'로 끝나야 합니다. 서술어 없이 명사형으로 끝납니다.
-    3. 출력 형식은 반드시 JSON 형식으로 반환해주세요. (추가 설명 없이)
-    """
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"말투 지시사항:\n{system_prompt}"},
-        ],
-        max_tokens=200,
-        temperature=0.7,
-    )
-
-    try:
-        return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        logger.error(f"말투 요약 파싱 실패: {e}")
-        return {
-            "hashtags": "#GPT #응답파싱 #실패",
-            "description": "말투 요약 실패한 말투",
-        }
-
 
 @router.post("/{influencer_id}/system-prompt")
 async def save_system_prompt(
@@ -1649,7 +1526,8 @@ async def chat_with_influencer(
                     
                     # 어댑터 로드
                     try:
-                        await vllm_client.load_adapter(model_id, model_id, hf_token)
+                        # model_id는 인플루언서 ID로, hf_repo_name은 실제 레포지토리 경로로 사용
+                        await vllm_client.load_adapter(model_id=str(api_key.influencer_id), hf_repo_name=model_id, hf_token=hf_token)
                         logger.info(f"✅ VLLM 어댑터 로드 완료: {model_id}")
                     except Exception as e:
                         logger.warning(f"⚠️ 어댑터 로드 실패, 기본 모델 사용: {e}")

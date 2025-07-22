@@ -187,6 +187,13 @@ class HFTokenService:
             if not update_data:
                 return token
             
+            # is_default가 True로 설정되는 경우, 같은 그룹의 다른 토큰들의 is_default를 False로 변경
+            if update_data.get('is_default', False):
+                db.query(HFTokenManage).filter(
+                    HFTokenManage.group_id == token.group_id,
+                    HFTokenManage.hf_manage_id != hf_manage_id
+                ).update({'is_default': False})
+            
             # 토큰 값이 변경되는 경우 유효성 검증
             if 'hf_token_value' in update_data:
                 token_test_result = self.test_hf_token(update_data['hf_token_value'])

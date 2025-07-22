@@ -77,7 +77,7 @@ class ToneGenerationService:
             
             # vLLM 응답을 기존 형식으로 변환
             conversation_examples = ToneGenerationService._convert_vllm_response_to_conversation_examples(vllm_result)
-            
+            print(conversation_examples)
             # 응답 구성
             result = {
                 "personality": request.personality,
@@ -117,14 +117,16 @@ class ToneGenerationService:
         conversation_examples = []
         
         try:
+            
             responses = vllm_result.get('responses', {})
+            
             for tone_name, tone_responses in responses.items():
+                print('tone_name',tone_name,'tone_responses', tone_responses)
                 if tone_responses and len(tone_responses) > 0:
                     tone_response = tone_responses[0]  # 첫 번째 응답 사용
                     
-                    tone_info = tone_response.get("tone_info", {})
-                    tone_description = tone_info.get("description", tone_name)
-                    hashtags = tone_info.get("hashtags", f"#{tone_name} #말투")
+                    tone_description = tone_response.get("description", tone_name)
+                    hashtags = tone_response.get("hashtags", f"#{tone_name} #말투")
                     system_prompt = tone_response.get("system_prompt", f"당신은 {tone_name} 말투로 대화하는 AI입니다.")
                     
                     conversation_examples.append({
@@ -166,28 +168,14 @@ class ToneGenerationService:
             )
             
             async with VLLMClient(vllm_config) as client:
-                # 먼저 고속 엔드포인트 시도
-                try:
-                    # 🚀 고속 어투 생성 엔드포인트 호출
-                    response = await client.client.post(
-                        "/speech/generate_qa_fast",  # 고속 병렬 처리 엔드포인트
-                        json=vllm_request_data,
-                        timeout=30  # 고속 처리로 타임아웃 단축
-                    )
-                    response.raise_for_status()
-                    logger.info("✅ 고속 엔드포인트 사용")
-                    
-                except Exception as fast_error:
-                    logger.warning(f"⚠️ 고속 엔드포인트 실패, 기존 엔드포인트로 폴백: {fast_error}")
-                    
-                    # 폴백: 기존 엔드포인트 사용
-                    response = await client.client.post(
-                        "/speech/generate_qa",  # 기존 호환성 엔드포인트
-                        json=vllm_request_data,
-                        timeout=60  # 기존 방식은 더 오래 걸림
-                    )
-                    response.raise_for_status()
-                    logger.info("✅ 기존 엔드포인트 사용 (폴백)")
+                # 🚀 고속 어투 생성 엔드포인트 호출 (fallback 제거)
+                response = await client.client.post(
+                    "/speech/generate_qa_fast",  # 고속 병렬 처리 엔드포인트
+                    json=vllm_request_data,
+                    timeout=60  # 안정적인 처리를 위해 타임아웃 증가
+                )
+                response.raise_for_status()
+                logger.info("✅ 고속 엔드포인트로 어투 생성 성공")
                 
                 result = response.json()
                 # 성능 정보 로깅
