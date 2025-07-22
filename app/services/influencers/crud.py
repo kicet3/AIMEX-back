@@ -49,8 +49,36 @@ def get_influencer_by_id(db: Session, user_id: str, influencer_id: str):
 
 
 def get_influencers_list(db: Session, user_id: str, skip: int = 0, limit: int = 100):
-    # This part needs to be implemented based on your permission logic
-    return db.query(AIInfluencer).offset(skip).limit(limit).all()
+    """인플루언서 목록 조회 (권한 체크 포함)"""
+    from app.models.user import User
+
+    # 사용자 정보 조회 (팀 정보 포함)
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
+
+    # 사용자가 속한 그룹 ID 목록
+    user_group_ids = [team.group_id for team in user.teams] if user.teams else []
+
+    # 인플루언서 조회 (권한 체크 포함)
+    query = db.query(AIInfluencer)
+
+    # 권한 체크: 사용자가 속한 그룹의 인플루언서이거나 사용자가 직접 소유한 인플루언서
+    if user_group_ids:
+        query = query.filter(
+            (AIInfluencer.group_id.in_(user_group_ids))
+            | (AIInfluencer.user_id == user_id)
+        )
+    else:
+        # 그룹이 없는 경우 사용자가 직접 소유한 인플루언서만
+        query = query.filter(AIInfluencer.user_id == user_id)
+
+    # 정렬 및 페이징
+    influencers = query.order_by(AIInfluencer.created_at.desc()).offset(skip).limit(limit).all()
+    
+    return influencers
 
 
 def create_influencer(db: Session, user_id: str, influencer_data: AIInfluencerCreate):

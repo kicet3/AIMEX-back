@@ -2,10 +2,8 @@
 간단한 Mock OpenAI 서비스 (패키지 오류 해결용)
 """
 
-import os
 import json
 from typing import Dict, List, Optional, Any
-from abc import ABC, abstractmethod
 from pydantic import BaseModel
 import logging
 from app.core.config import settings
@@ -44,7 +42,6 @@ class ContentGenerationResponse(BaseModel):
     """콘텐츠 생성 응답 모델"""
 
     social_media_content: str
-    english_prompt_for_comfyui: str
     hashtags: List[str]
     metadata: Dict[str, Any]
 
@@ -72,53 +69,38 @@ class OpenAIService:
         try:
             # 시스템 프롬프트
             system_prompt = f"""
-            당신은 {request.platform} 플랫폼에 특화된 소셜 미디어 콘텐츠 전문가입니다.
-            주어진 주제와 내용을 바탕으로 다음을 생성해주세요:
-            1. 매력적이고 참여도 높은 소셜 미디어 포스트 (한국어)
-            2. 이미지 생성을 위한 영어 프롬프트 (ComfyUI용)
-            3. 게시글 설명(본문 내용) 기반 해시태그 (최대 10개)
-            
-            해시태그 생성 규칙 (게시글 설명 우선 분석):
-            
-            [본문 내용 분석 (5-6개)]
-            - 게시글 설명에서 언급된 구체적인 키워드나 주제
-            - 본문에서 강조하는 내용이나 핵심 메시지
-            - 예: "오늘 맛집에서 먹은 파스타" → #맛집 #파스타 #맛스타그램
-            
-            [목적 분석 (2-3개)]
-            - 본문의 의도나 목적 (정보제공, 동기부여, 공유, 추천, 리뷰, 팁 등)
-            - 예: "이 팁 꼭 알아두세요" → #팁 #정보공유 #꿀팁
-            
-            [감정/톤 분석 (1-2개)]
-            - 본문의 감정적 톤이나 분위기 (힐링, 동기부여, 재미, 감동 등)
-            - 예: "정말 감동받았어요" → #감동 #힐링
-            
-            [대상 분석 (1-2개)]
-            - 본문에서 언급된 대상이나 독자층
-            - 예: "직장인 여러분" → #직장인 #워라밸
-            
-            중요: 주제보다는 실제 게시글 설명(본문 내용)을 우선적으로 분석하여 해시태그를 생성해주세요.
-            본문에서 구체적으로 언급된 내용을 기반으로 정확하고 관련성 높은 해시태그를 만들어주세요.
-            
-            응답은 반드시 JSON 형식으로 해주세요:
-            {{
-                "social_media_content": "포스트 내용",
-                "english_prompt_for_comfyui": "영어 이미지 프롬프트",
-                "hashtags": ["#본문키워드1", "#본문키워드2", "#목적해시태그1", "#감정해시태그1", "#대상해시태그1"]
-            }}
-            
-            중요: 해시태그는 반드시 #으로 시작해야 합니다. ##은 사용하지 마세요.
-            """
+            당신은 다양한 플랫폼(예: 인스타그램, 유튜브 쇼츠, 틱톡, 블로그 등)에 특화된 소셜 미디어 콘텐츠 전문가입니다.
+
+아래 지침에 따라 {request.platform} 플랫폼에 최적화된 콘텐츠 가이드라인, 출력 포맷, 예시 콘텐츠, 해시태그 생성 규칙을 스스로 설계하고 제공하세요.
+
+- 사전에 입력된 플랫폼별 규칙 없이, {request.platform} 플랫폼의 특성과 업로드 방식을 스스로 분석하여 다음을 생성하세요:
+  1. {request.platform} 플랫폼에서 사람들이 선호하는 콘텐츠 형식, 길이, 스타일, 어조를 분석하여 콘텐츠 제작 가이드라인을 작성하세요.
+  2. {request.platform} 플랫폼의 업로드 형식(예: 텍스트 포스트, 영상 스크립트, 핵심 문장 등)을 고려하여 출력 포맷(JSON 구조 포함)을 직접 설계하세요.
+  3. {request.platform} 플랫폼에서 최적의 참여를 유도할 수 있는 실제 콘텐츠 예시를 작성하세요.
+  4. {request.platform} 플랫폼에 맞는 해시태그 생성 방식을 설명하세요.
+
+응답은 반드시 아래 JSON 형식 그대로 반환하세요:
+
+{
+  "content_guideline": "{request.platform} 플랫폼에서 최적의 콘텐츠를 제작하기 위한 지침",
+  "output_format": "{request.platform} 플랫폼에 맞는 최종 출력 포맷(JSON 구조로 예시 제공)",
+  "example_response": "{request.platform} 플랫폼에서 생성될 실제 예시 콘텐츠",
+  "hashtags_generation_rule": "{request.platform} 플랫폼에 맞는 해시태그 생성 방식 설명",
+  "hashtags": ["#예시해시태그1", "#예시해시태그2", "#예시해시태그3"]
+}
+
+주의: 해시태그는 반드시 #으로 시작해야 하며, ##는 사용하지 마세요.
+"""
 
             # 사용자 프롬프트
             user_prompt = f"""
-            주제: {request.topic}
-            플랫폼: {request.platform}
-            추가 내용: {request.include_content or "없음"}
-            기존 해시태그: {request.hashtags or "없음"}
-            인플루언서 성격: {request.influencer_personality or "친근하고 전문적"}
-            톤: {request.influencer_tone or "밝고 긍정적"}
-            """
+주제: {request.topic}
+플랫폼: {request.platform}
+추가 내용: {request.include_content or "없음"}
+기존 해시태그: {request.hashtags or "없음"}
+인플루언서 성격: {request.influencer_personality or "친근하고 전문적"}
+톤: {request.influencer_tone or "밝고 긍정적"}
+"""
 
             response = openai_client.chat.completions.create(
                 model=settings.OPENAI_MODEL,
@@ -154,9 +136,6 @@ class OpenAIService:
 
                 return ContentGenerationResponse(
                     social_media_content=parsed_content.get("social_media_content", ""),
-                    english_prompt_for_comfyui=parsed_content.get(
-                        "english_prompt_for_comfyui", ""
-                    ),
                     hashtags=processed_hashtags,
                     metadata={
                         "model": settings.OPENAI_MODEL,
@@ -171,7 +150,6 @@ class OpenAIService:
                 # JSON 파싱 실패 시 텍스트 그대로 사용
                 return ContentGenerationResponse(
                     social_media_content=content or "",
-                    english_prompt_for_comfyui=f"high quality, realistic, {request.topic}, professional photography",
                     hashtags=["#AI생성", "#소셜미디어"],
                     metadata={
                         "model": settings.OPENAI_MODEL,
@@ -323,13 +301,6 @@ class OpenAIService:
         unique_hashtags = list(dict.fromkeys(hashtags))[:10]
 
         return unique_hashtags
-
-    async def generate_comfyui_prompt(
-        self, topic: str, style: str = "realistic"
-    ) -> str:
-        """Mock ComfyUI 프롬프트 생성"""
-        return f"high quality, {style}, {topic}, professional photography, beautiful lighting, 8k resolution, detailed"
-
 
 # 싱글톤 패턴
 _openai_service_instance = None

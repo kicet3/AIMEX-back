@@ -190,7 +190,6 @@ class AIInfluencer(Base, TimestampMixin):
         ),
     )
 
-
 class GeneratedTone(Base, TimestampMixin):
     """생성된 어투 모델"""
 
