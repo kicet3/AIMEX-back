@@ -9,6 +9,7 @@ import json
 from typing import List, Dict, Any
 import os
 from app.core.config import settings
+from app.utils.korean_romanizer import korean_name_to_roman
 logger = logging.getLogger(__name__)
 
 
@@ -114,7 +115,7 @@ def format_model_name_for_korean(korean_name: str) -> str:
     """
     한글 이름을 모델명에 적합한 영문으로 변환 (로컬 처리)
     """
-    # 간단한 한글 단어 매핑
+    # 간단한 한글 단어 매핑 (특수 케이스)
     name_mapping = {
         '루시우': 'lucio',
         '아나': 'ana', 
@@ -139,20 +140,27 @@ def format_model_name_for_korean(korean_name: str) -> str:
     if korean_name in name_mapping:
         return name_mapping[korean_name]
     
-    # 간단한 변환: 영문자와 숫자만 남기고 나머지는 제거
-    result = ""
-    for char in korean_name:
-        if char.isalnum():
-            if 'a' <= char <= 'z' or 'A' <= char <= 'Z' or '0' <= char <= '9':
-                result += char.lower()
-            else:
-                # 한글인 경우 간단히 처리
-                result += 'ko'
-        elif char in ['-', '_']:
-            result += char
+    # 한글 로마자 변환기 사용
+    result = korean_name_to_roman(korean_name)
+    
+    # 영문자, 숫자, 하이픈, 언더스코어만 남기고 소문자로 변환
+    cleaned_result = ""
+    for char in result:
+        if char.isalnum() or char in ['-', '_', ' ']:
+            cleaned_result += char.lower()
+    
+    # 공백을 하이픈으로 변환
+    cleaned_result = cleaned_result.replace(' ', '-')
+    
+    # 연속된 하이픈 제거
+    while '--' in cleaned_result:
+        cleaned_result = cleaned_result.replace('--', '-')
+    
+    # 앞뒤 하이픈 제거
+    cleaned_result = cleaned_result.strip('-')
     
     # 결과가 비어있거나 너무 짧으면 기본값 사용
-    if not result or len(result) < 2:
-        result = f"influencer_{hash(korean_name) % 10000}"
+    if not cleaned_result or len(cleaned_result) < 2:
+        cleaned_result = f"influencer_{hash(korean_name) % 10000}"
     
-    return result
+    return cleaned_result
