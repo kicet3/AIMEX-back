@@ -48,8 +48,7 @@ async def generate_voice(
     
     # 인플루언서 확인
     influencer = db.query(AIInfluencer).filter(
-        AIInfluencer.influencer_id == request.influencer_id,
-        AIInfluencer.user_id == user_id
+        AIInfluencer.influencer_id == request.influencer_id
     ).first()
     
     if not influencer:

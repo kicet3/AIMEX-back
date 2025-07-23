@@ -1860,10 +1860,8 @@ async def delete_generated_voice(
     if not voice:
         raise HTTPException(status_code=404, detail="음성을 찾을 수 없습니다")
     
-    # 소유자 확인
     influencer = db.query(AIInfluencer).filter(
         AIInfluencer.influencer_id == voice.influencer_id,
-        AIInfluencer.user_id == user_id
     ).first()
     
     if not influencer:
