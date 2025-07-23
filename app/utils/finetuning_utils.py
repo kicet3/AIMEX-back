@@ -8,11 +8,11 @@ import aiohttp
 import json
 from typing import List, Dict, Any
 import os
-
+from app.core.config import settings
 logger = logging.getLogger(__name__)
 
-VLLM_SERVER_URL = os.getenv("VLLM_SERVER_URL", "http://localhost:8001")
 
+VLLM_SERVER_URL = settings.VLLM_BASE_URL
 async def create_system_message(influencer_name: str, personality: str, style_info: str = "") -> str:
     """vLLM 서버에 시스템 메시지 생성 요청"""
     try:
