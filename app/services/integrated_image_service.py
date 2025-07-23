@@ -3,89 +3,55 @@
 
 ComfyUI 이미지 생성 + 로컬/S3 저장 + 데이터베이스 연동을 통합하는 서비스
 
-SOLID 원칙:
-- SRP: 이미지 생성과 저장의 전체 워크플로우 담당
-- OCP: 새로운 이미지 생성기나 저장소 추가 시 확장 가능
-- LSP: 인터페이스 기반으로 구현체 교체 가능
-- ISP: 클라이언트별 필요한 메서드만 노출
-- DIP: 구체적인 구현이 아닌 추상화에 의존
-
-Clean Architecture:
-- Application Layer: 이미지 생성 유스케이스 조정
-- Domain Layer: 이미지 생성 비즈니스 로직
-- Infrastructure Layer: 외부 서비스 연동
 """
 
 import uuid
 import base64
 import asyncio
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 from io import BytesIO
 import aiohttp
+from pydantic import BaseModel
 
 from .comfyui_service import get_comfyui_service, ImageGenerationRequest, ImageGenerationResponse
-from .image_storage_service import get_image_storage_service
+from .s3_service import get_s3_service
 from app.models.image_generation import ImageGenerationRequest as ImageGenerationModel
 from app.database import get_db
+from app.core.config import settings
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
 
-class IntegratedImageGenerationRequest:
-    """통합 이미지 생성 요청 모델"""
+class IntegratedImageGenerationRequest(BaseModel):
+    """통합 이미지 생성 요청 모델 - Pydantic 기반"""
     
-    def __init__(self,
-                 prompt: str,
-                 user_id: str,
-                 board_id: Optional[str] = None,
-                 negative_prompt: Optional[str] = None,
-                 width: int = 1024,
-                 height: int = 1024,
-                 steps: int = 20,
-                 cfg_scale: float = 7.0,
-                 seed: Optional[int] = None,
-                 style: str = "realistic",
-                 save_to_storage: bool = True,
-                 save_to_db: bool = True):
-        
-        self.prompt = prompt
-        self.user_id = user_id
-        self.board_id = board_id
-        self.negative_prompt = negative_prompt or "low quality, blurry, distorted"
-        self.width = width
-        self.height = height
-        self.steps = steps
-        self.cfg_scale = cfg_scale
-        self.seed = seed
-        self.style = style
-        self.save_to_storage = save_to_storage
-        self.save_to_db = save_to_db
+    prompt: str
+    user_id: str
+    board_id: Optional[str] = None
+    style_preset: str = "realistic"
+    width: int = 1024
+    height: int = 1024
+    steps: int = 20
+    cfg_scale: float = 7.0
+    seed: Optional[int] = None
+    save_to_storage: bool = True
+    save_to_db: bool = True
 
 
-class IntegratedImageGenerationResponse:
-    """통합 이미지 생성 응답 모델"""
+class IntegratedImageGenerationResponse(BaseModel):
+    """통합 이미지 생성 응답 모델 - Pydantic 기반"""
     
-    def __init__(self,
-                 success: bool,
-                 request_id: str,
-                 images: List[str] = None,
-                 storage_urls: List[str] = None,
-                 selected_image_url: Optional[str] = None,
-                 generation_time: Optional[float] = None,
-                 error_message: Optional[str] = None,
-                 metadata: Dict[str, Any] = None):
-        
-        self.success = success
-        self.request_id = request_id
-        self.images = images or []
-        self.storage_urls = storage_urls or []
-        self.selected_image_url = selected_image_url
-        self.generation_time = generation_time
-        self.error_message = error_message
-        self.metadata = metadata or {}
+    success: bool
+    request_id: str
+    images: List[str] = []
+    storage_urls: List[str] = []
+    selected_image_url: Optional[str] = None
+    generation_time: Optional[float] = None
+    error_message: Optional[str] = None
+    metadata: Dict[str, Any] = {}
 
 
 class IntegratedImageGenerationService:
@@ -97,7 +63,7 @@ class IntegratedImageGenerationService:
     
     def __init__(self):
         self.comfyui_service = get_comfyui_service()
-        self.storage_service = get_image_storage_service()
+        self.s3_service = get_s3_service()
         
         logger.info("IntegratedImageGenerationService initialized")
     
@@ -105,38 +71,32 @@ class IntegratedImageGenerationService:
                                     request: IntegratedImageGenerationRequest,
                                     db: AsyncSession = None) -> IntegratedImageGenerationResponse:
         """
-        이미지 생성부터 저장까지 전체 워크플로우 실행
+        간소화된 이미지 생성 워크플로우
         
-        Clean Architecture: 유스케이스 조정자 역할
+        1. ComfyUI로 이미지 생성 (RunPod 사용)
+        2. 생성된 이미지 S3에 저장
+        3. 데이터베이스에 결과 저장
         """
         
         request_id = str(uuid.uuid4())
         start_time = datetime.now()
         
         try:
-            # 1. 데이터베이스에 요청 기록 (시작)
-            if request.save_to_db and db:
-                await self._save_request_to_db(request_id, request, "pending", db)
-            
-            # 2. ComfyUI로 이미지 생성
             logger.info(f"Starting image generation for request {request_id}")
             
+            # 1단계: ComfyUI로 이미지 생성
             comfyui_request = ImageGenerationRequest(
                 prompt=request.prompt,
-                negative_prompt=request.negative_prompt,
+                negative_prompt="low quality, blurry, distorted",
                 width=request.width,
                 height=request.height,
                 steps=request.steps,
                 cfg_scale=request.cfg_scale,
                 seed=request.seed,
-                style=request.style,
+                style=request.style_preset,
                 user_id=request.user_id,
-                use_runpod=True  # RunPod 사용 활성화
+                use_runpod=True  # 실제 RunPod 사용
             )
-            
-            # 이미지 생성 상태를 DB에 업데이트
-            if request.save_to_db and db:
-                await self._update_request_status(request_id, "processing", db)
             
             comfyui_response = await self.comfyui_service.generate_image(comfyui_request)
             
@@ -145,34 +105,27 @@ class IntegratedImageGenerationService:
             
             logger.info(f"ComfyUI generation completed: {len(comfyui_response.images)} images")
             
-            # 3. 생성된 이미지를 저장소에 저장
+            # 2단계: S3에 이미지 저장
             storage_urls = []
             if request.save_to_storage and comfyui_response.images:
-                storage_urls = await self._save_images_to_storage(
+                storage_urls = await self._save_images_to_s3(
                     comfyui_response.images, 
                     request.user_id,
                     request_id
                 )
-                logger.info(f"Images saved to storage: {len(storage_urls)} URLs")
+                logger.info(f"Images saved to S3: {len(storage_urls)} URLs")
             
-            # 4. 첫 번째 이미지를 선택된 이미지로 설정
+            # 3단계: 선택된 이미지 URL 설정
             selected_image_url = storage_urls[0] if storage_urls else comfyui_response.images[0] if comfyui_response.images else None
             
-            # 5. 최종 결과를 데이터베이스에 저장
+            # 4단계: 생성 시간 계산
             generation_time = (datetime.now() - start_time).total_seconds()
             
+            # 5단계: 데이터베이스 저장 (옵션)
             if request.save_to_db and db:
-                await self._save_final_result_to_db(
-                    request_id,
-                    "completed",
-                    storage_urls,
-                    selected_image_url,
-                    generation_time,
-                    comfyui_response.metadata,
-                    db
-                )
+                await self._save_to_db(request_id, request, comfyui_response, storage_urls, generation_time, db)
             
-            # 6. 성공 응답 반환
+            # 6단계: 성공 응답 반환
             return IntegratedImageGenerationResponse(
                 success=True,
                 request_id=request_id,
@@ -181,19 +134,14 @@ class IntegratedImageGenerationService:
                 selected_image_url=selected_image_url,
                 generation_time=generation_time,
                 metadata={
-                    "comfyui_job_id": comfyui_response.job_id,
-                    "comfyui_metadata": comfyui_response.metadata,
-                    "storage_type": "local" if hasattr(self.storage_service, 'storage_path') else "s3",
-                    "board_id": request.board_id
+                    "original_prompt": request.prompt,
+                    "style_preset": request.style_preset,
+                    "comfyui_metadata": comfyui_response.metadata
                 }
             )
             
         except Exception as e:
             logger.error(f"Integrated image generation failed: {e}")
-            
-            # 실패 상태를 DB에 기록
-            if request.save_to_db and db:
-                await self._update_request_status(request_id, "failed", db, str(e))
             
             return IntegratedImageGenerationResponse(
                 success=False,
@@ -202,11 +150,11 @@ class IntegratedImageGenerationService:
                 generation_time=(datetime.now() - start_time).total_seconds()
             )
     
-    async def _save_images_to_storage(self, 
-                                    images: List[str], 
-                                    user_id: str,
-                                    request_id: str) -> List[str]:
-        """생성된 이미지들을 저장소에 저장"""
+    async def _save_images_to_s3(self, 
+                               images: List[str], 
+                               user_id: str,
+                               request_id: str) -> List[str]:
+        """생성된 이미지들을 S3에 우선 저장"""
         
         storage_urls = []
         
@@ -218,23 +166,57 @@ class IntegratedImageGenerationService:
                 if image_bytes:
                     # 파일명 생성
                     filename = f"generated_{request_id}_{i+1}.png"
+                    s3_key = f"generated-images/{user_id}/{filename}"
                     
-                    # 저장소에 저장
-                    storage_url = await self.storage_service.save_image(
+                    # S3에 저장
+                    upload_result = self.s3_service.upload_bytes(
                         image_bytes, 
-                        filename, 
-                        user_id
+                        s3_key,
+                        content_type="image/png"
                     )
                     
-                    storage_urls.append(storage_url)
-                    logger.info(f"Image {i+1} saved: {storage_url}")
+                    if upload_result.get("success") and upload_result.get("url"):
+                        storage_urls.append(upload_result["url"])
+                        logger.info(f"Image {i+1} saved to S3: {upload_result['url']}")
                 
             except Exception as e:
-                logger.error(f"Failed to save image {i+1}: {e}")
+                logger.error(f"Failed to save image {i+1} to S3: {e}")
                 # 일부 이미지 저장 실패해도 계속 진행
                 continue
         
         return storage_urls
+    
+    async def _save_to_db(self, 
+                        request_id: str, 
+                        request: IntegratedImageGenerationRequest,
+                        comfyui_response: ImageGenerationResponse,
+                        storage_urls: List[str],
+                        generation_time: float,
+                        db: AsyncSession):
+        """결과를 데이터베이스에 저장"""
+        try:
+            db_request = ImageGenerationModel(
+                request_id=request_id,
+                user_id=request.user_id,
+                prompt=request.prompt,
+                width=request.width,
+                height=request.height,
+                steps=request.steps,
+                cfg_scale=request.cfg_scale,
+                seed=request.seed,
+                status="completed",
+                result_url=storage_urls[0] if storage_urls else comfyui_response.images[0] if comfyui_response.images else None,
+                processing_time=generation_time
+            )
+            
+            db.add(db_request)
+            await db.commit()
+            
+            logger.info(f"Request saved to DB: {request_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to save to DB: {e}")
+            await db.rollback()
     
     async def _convert_image_to_bytes(self, image_data: str) -> Optional[bytes]:
         """이미지 데이터를 바이트로 변환"""
@@ -264,110 +246,6 @@ class IntegratedImageGenerationService:
             logger.error(f"Failed to convert image data: {e}")
             return None
     
-    async def _save_request_to_db(self, 
-                                request_id: str, 
-                                request: IntegratedImageGenerationRequest,
-                                status: str,
-                                db: AsyncSession):
-        """요청을 데이터베이스에 저장"""
-        
-        try:
-            db_request = ImageGenerationModel(
-                request_id=request_id,
-                user_id=request.user_id,
-                original_prompt=request.prompt,
-                negative_prompt=request.negative_prompt,
-                width=request.width,
-                height=request.height,
-                steps=request.steps,
-                cfg_scale=request.cfg_scale,
-                seed=request.seed,
-                style=request.style,
-                status=status,
-                extra_metadata={
-                    "board_id": request.board_id,
-                    "save_to_storage": request.save_to_storage
-                }
-            )
-            
-            db.add(db_request)
-            await db.commit()
-            
-            logger.info(f"Request saved to DB: {request_id}")
-            
-        except Exception as e:
-            logger.error(f"Failed to save request to DB: {e}")
-            await db.rollback()
-    
-    async def _update_request_status(self,
-                                   request_id: str,
-                                   status: str,
-                                   db: AsyncSession,
-                                   error_message: Optional[str] = None):
-        """요청 상태 업데이트"""
-        
-        try:
-            # 요청 조회
-            from sqlalchemy import select
-            result = await db.execute(
-                select(ImageGenerationModel).where(ImageGenerationModel.request_id == request_id)
-            )
-            db_request = result.scalar_one_or_none()
-            
-            if db_request:
-                db_request.status = status
-                if error_message:
-                    db_request.error_message = error_message
-                
-                if status == "processing":
-                    db_request.started_at = datetime.now()
-                elif status in ["completed", "failed"]:
-                    db_request.completed_at = datetime.now()
-                
-                await db.commit()
-                logger.info(f"Request status updated: {request_id} -> {status}")
-            
-        except Exception as e:
-            logger.error(f"Failed to update request status: {e}")
-            await db.rollback()
-    
-    async def _save_final_result_to_db(self,
-                                     request_id: str,
-                                     status: str,
-                                     storage_urls: List[str],
-                                     selected_image_url: Optional[str],
-                                     generation_time: float,
-                                     metadata: Dict[str, Any],
-                                     db: AsyncSession):
-        """최종 결과를 데이터베이스에 저장"""
-        
-        try:
-            # 요청 조회
-            from sqlalchemy import select
-            result = await db.execute(
-                select(ImageGenerationModel).where(ImageGenerationModel.request_id == request_id)
-            )
-            db_request = result.scalar_one_or_none()
-            
-            if db_request:
-                db_request.status = status
-                db_request.generated_images = storage_urls
-                db_request.selected_image = selected_image_url
-                db_request.generation_time = generation_time
-                db_request.completed_at = datetime.now()
-                
-                # 메타데이터 업데이트
-                if db_request.extra_metadata:
-                    db_request.extra_metadata.update(metadata)
-                else:
-                    db_request.extra_metadata = metadata
-                
-                await db.commit()
-                logger.info(f"Final result saved to DB: {request_id}")
-            
-        except Exception as e:
-            logger.error(f"Failed to save final result to DB: {e}")
-            await db.rollback()
 
 
 # 싱글톤 패턴으로 서비스 인스턴스 관리

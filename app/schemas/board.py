@@ -9,6 +9,8 @@ class BoardBase(BaseModel):
     influencer_id: str
     user_id: str
     team_id: int
+    session_id: Optional[str] = None  # Pod 세션 ID
+    pipeline_id: Optional[str] = None  # 프롬프트 처리 파이프라인 ID
     group_id: int
     board_topic: str
     board_description: Optional[str] = None
@@ -21,6 +23,8 @@ class BoardBase(BaseModel):
 class BoardCreate(BaseModel):
     influencer_id: str
     team_id: int
+    session_id: Optional[str] = None  # Pod 세션 ID
+    pipeline_id: Optional[str] = None  # 프롬프트 처리 파이프라인 ID
     board_topic: str
     board_description: Optional[str] = None
     board_platform: int

@@ -1,56 +1,38 @@
-from sqlalchemy import Column, String, Text, DateTime, Integer, JSON, Boolean, Float
+"""
+이미지 생성 요청 모델 (호환성 유지용)
+
+기존 코드와의 호환성을 위해 필요한 최소한의 모델
+"""
+
+from sqlalchemy import Column, String, Integer, Text, DateTime, Float, Boolean
 from sqlalchemy.sql import func
-from app.models.base import Base
+from app.models.base import Base, TimestampMixin
+import uuid
 
 
-class ImageGenerationRequest(Base):
-    """이미지 생성 요청 테이블"""
+class ImageGenerationRequest(Base, TimestampMixin):
+    """이미지 생성 요청 모델 (호환성용)"""
+    
     __tablename__ = "image_generation_requests"
-
-    # 기본 정보
-    request_id = Column(String(36), primary_key=True, index=True)  # UUID
-    user_id = Column(String(36), nullable=False, index=True)
     
-    # 프롬프트 정보 (사용자 입력)
-    original_prompt = Column(Text, nullable=False)  # 사용자 입력 (한글/영문)
-    optimized_prompt = Column(Text, nullable=True)  # OpenAI로 최적화된 영문 프롬프트
-    negative_prompt = Column(Text, nullable=True, default="low quality, blurry, distorted")
-    
-    # RunPod 정보
-    runpod_pod_id = Column(String(100), nullable=True)  # RunPod 인스턴스 ID
-    runpod_endpoint_url = Column(String(500), nullable=True)  # 동적 엔드포인트 URL
-    runpod_status = Column(String(20), default="pending")  # pending, starting, ready, processing, completed, failed
-    
-    # ComfyUI 정보
-    comfyui_job_id = Column(String(100), nullable=True)  # ComfyUI 작업 ID
-    comfyui_workflow = Column(JSON, nullable=True)  # 사용된 워크플로우
-    
-    # 이미지 설정
-    width = Column(Integer, default=1024)
-    height = Column(Integer, default=1024)
-    steps = Column(Integer, default=20)
-    cfg_scale = Column(Float, default=7.0)
-    seed = Column(Integer, nullable=True)
-    style = Column(String(50), default="realistic")
-    
-    # 생성 상태 및 결과
-    status = Column(String(20), default="pending")  # pending, processing, completed, failed
-    generated_images = Column(JSON, nullable=True)  # 생성된 이미지 URL/경로 리스트
-    selected_image = Column(String(500), nullable=True)  # 사용자가 선택한 최종 이미지
-    
-    # 시간 및 비용 추적
-    generation_time = Column(Float, nullable=True)  # 생성 소요 시간 (초)
-    runpod_cost = Column(Float, nullable=True)  # RunPod 사용 비용 (USD)
-    error_message = Column(Text, nullable=True)  # 실패 시 에러 메시지
-    
-    # 메타데이터
-    extra_metadata = Column(JSON, nullable=True)  # 추가 메타데이터
-    
-    # 타임스탬프
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    started_at = Column(DateTime(timezone=True), nullable=True)  # 처리 시작 시간
-    completed_at = Column(DateTime(timezone=True), nullable=True)  # 완료 시간
+    request_id = Column(
+        String(255), 
+        primary_key=True, 
+        default=lambda: str(uuid.uuid4()),
+        comment="요청 고유 식별자"
+    )
+    user_id = Column(String(255), nullable=False, comment="사용자 ID")
+    prompt = Column(Text, nullable=False, comment="생성 프롬프트")
+    negative_prompt = Column(Text, comment="부정 프롬프트")
+    width = Column(Integer, default=1024, comment="이미지 너비")
+    height = Column(Integer, default=1024, comment="이미지 높이")
+    steps = Column(Integer, default=20, comment="생성 스텝")
+    cfg_scale = Column(Float, default=7.0, comment="CFG 스케일")
+    seed = Column(Integer, comment="시드값")
+    status = Column(String(50), default='pending', comment="생성 상태")
+    result_url = Column(String(1000), comment="결과 이미지 URL")
+    error_message = Column(Text, comment="오류 메시지")
+    processing_time = Column(Float, comment="처리 시간(초)")
     
     def __repr__(self):
-        return f"<ImageGenerationRequest(id={self.request_id}, status={self.status})>"
+        return f"<ImageGenerationRequest {self.request_id}: {self.status}>"

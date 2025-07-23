@@ -50,16 +50,16 @@ router = APIRouter(prefix="/images", tags=["images"])
 class ImageGenerationRequestSchema(BaseModel):
     """이미지 생성 요청 스키마"""
 
+    # 기본 정보
     prompt: str = Field(..., description="이미지 생성 프롬프트", min_length=1)
-    negative_prompt: Optional[str] = Field(None, description="네거티브 프롬프트")
+    style_preset: str = Field("realistic", description="스타일 프리셋")
     width: int = Field(1024, description="이미지 너비", ge=512, le=2048)
     height: int = Field(1024, description="이미지 높이", ge=512, le=2048)
     steps: int = Field(20, description="생성 스텝 수", ge=10, le=50)
     cfg_scale: float = Field(7.0, description="CFG 스케일", ge=1.0, le=20.0)
     seed: Optional[int] = Field(None, description="시드 값")
-    style: str = Field("realistic", description="이미지 스타일")
     board_id: Optional[str] = Field(None, description="연결된 게시글 ID")
-    save_to_storage: bool = Field(True, description="저장소에 저장 여부")
+    save_to_storage: bool = Field(True, description="S3 저장 여부")
 
 
 class ImageGenerationResponseSchema(BaseModel):
@@ -93,32 +93,37 @@ async def generate_image(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    AI 이미지 생성
-
-    ComfyUI를 사용하여 이미지를 생성하고 저장소에 저장합니다.
+    AI 이미지 생성 - 새로운 플로우 적용
+    
+    요구사항에 따른 전체 워크플로우:
+    1. 세션 확인 및 이미지 생성 시작
+    2. 프롬프트 S3 저장 → OpenAI 최적화 → S3 재저장
+    3. 대기 중인 커스텀 Pod에서 이미지 생성
+    4. 생성된 이미지 S3 저장
+    5. 10분 타임리밋 관리
     """
 
     try:
         logger.info(
-            f"Image generation request from user {current_user.get('sub')}: {request.prompt[:50]}..."
+            f"New flow image generation request from user {current_user.get('sub')}: {request.prompt[:50]}..."
         )
 
-        # 통합 이미지 생성 요청 생성
+        # 사용자 ID 추출
         user_id = current_user.get("sub")
         if not user_id:
             raise HTTPException(status_code=401, detail="사용자 ID를 찾을 수 없습니다.")
 
+        # 통합 이미지 생성 요청 생성
         integrated_request = IntegratedImageGenerationRequest(
             prompt=request.prompt,
             user_id=user_id,
             board_id=request.board_id,
-            negative_prompt=request.negative_prompt,
+            style_preset=request.style_preset,
             width=request.width,
             height=request.height,
             steps=request.steps,
             cfg_scale=request.cfg_scale,
             seed=request.seed,
-            style=request.style,
             save_to_storage=request.save_to_storage,
             save_to_db=True,
         )
@@ -141,6 +146,14 @@ async def generate_image(
 
     except Exception as e:
         logger.error(f"Image generation failed: {e}")
+        
+        # 자원 부족 메시지 특별 처리
+        if "현재 이미지를 생성할 자원이 부족합니다" in str(e):
+            raise HTTPException(
+                status_code=503,
+                detail="현재 이미지를 생성할 자원이 부족합니다. 잠시 후 다시 시도해주세요!"
+            )
+        
         raise HTTPException(
             status_code=500, detail=f"이미지 생성에 실패했습니다: {str(e)}"
         )

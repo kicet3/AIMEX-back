@@ -8,6 +8,7 @@ from sqlalchemy import (
     Text,
     SmallInteger,
     TIMESTAMP,
+    DateTime,
 )
 from sqlalchemy.orm import relationship
 from app.models.base import Base, TimestampMixin
@@ -42,11 +43,20 @@ class User(Base, TimestampMixin):
     provider = Column(String(20), nullable=False, comment="소셜 로그인 제공자")
     user_name = Column(String(20), nullable=False, comment="사용자 이름")
     email = Column(String(50), nullable=False, unique=True, comment="사용자 이메일")
+    
+    # Pod 세션 관리 컬럼들 (새로 추가)
+    current_pod_id = Column(String(100), nullable=True, comment="현재 활성 RunPod ID")
+    pod_status = Column(String(20), default="none", comment="Pod 상태: none, starting, ready, processing")
+    session_created_at = Column(DateTime(timezone=True), nullable=True, comment="세션 생성 시간")
+    session_expires_at = Column(DateTime(timezone=True), nullable=True, comment="세션 만료 시간 (15분)")
+    processing_expires_at = Column(DateTime(timezone=True), nullable=True, comment="처리 만료 시간 (10분)")
+    total_generations = Column(Integer, default=0, comment="총 이미지 생성 횟수")
 
     # 관계
     teams = relationship("Team", secondary=user_group, back_populates="users")
     system_logs = relationship("SystemLog", back_populates="user")
     ai_influencers = relationship("AIInfluencer", back_populates="user")
+    # 이미지 저장소와의 관계는 Team을 통해 관리됨
 
 
 
@@ -65,6 +75,7 @@ class Team(Base, TimestampMixin):
     users = relationship("User", secondary=user_group, back_populates="teams")
     hf_tokens = relationship("HFTokenManage", back_populates="team")
     ai_influencers = relationship("AIInfluencer", back_populates="team")
+    # image_storages = relationship("ImageStorage", back_populates="group")  # Temporarily disabled for session fix
 
 
 class HFTokenManage(Base, TimestampMixin):

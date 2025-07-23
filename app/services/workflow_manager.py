@@ -108,15 +108,34 @@ class FileBasedWorkflowManager(WorkflowManagerInterface):
         """워크플로우 목록 조회"""
         workflows = []
         try:
-            for filename in os.listdir(self.workflows_dir):
+            logger.info(f"📁 워크플로우 디렉토리 스캔: {self.workflows_dir}")
+            
+            if not os.path.exists(self.workflows_dir):
+                logger.warning(f"⚠️ 워크플로우 디렉토리가 존재하지 않음: {self.workflows_dir}")
+                return workflows
+            
+            files = os.listdir(self.workflows_dir)
+            logger.info(f"📂 디렉토리 내 파일들: {files}")
+            
+            for filename in files:
                 if filename.endswith('.json'):
                     workflow_id = filename[:-5]  # .json 제거
+                    logger.info(f"🔍 워크플로우 로드 시도: {workflow_id}")
                     workflow = await self.get_workflow(workflow_id)
                     if workflow and workflow.is_active:
                         if category is None or workflow.category == category:
                             workflows.append(workflow)
+                            logger.info(f"✅ 워크플로우 추가: {workflow.name}")
+                        else:
+                            logger.info(f"🔒 카테고리 불일치로 제외: {workflow.name} (카테고리: {workflow.category})")
+                    elif workflow and not workflow.is_active:
+                        logger.info(f"🔒 비활성 워크플로우로 제외: {workflow.name}")
+                    else:
+                        logger.warning(f"⚠️ 워크플로우 로드 실패: {workflow_id}")
+                        
+            logger.info(f"📋 최종 워크플로우 목록: {len(workflows)}개")
         except Exception as e:
-            logger.error(f"Failed to list workflows: {e}")
+            logger.error(f"❌ 워크플로우 목록 조회 중 오류: {e}", exc_info=True)
         
         return sorted(workflows, key=lambda w: w.name)
     

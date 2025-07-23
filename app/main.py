@@ -17,6 +17,8 @@ from app.api.v1.api import api_router
 from app.services.startup_service import run_startup_tasks
 from app.services.batch_monitor import start_batch_monitoring, stop_batch_monitoring
 from app.services.scheduler_service import scheduler_service
+# 세션 정리 서비스 - 비동기로 수정 완료
+from app.services.session_cleanup_service import start_session_cleanup_service, stop_session_cleanup_service
 
 # 로깅 설정
 if settings.DEBUG:
@@ -82,6 +84,13 @@ async def lifespan(app: FastAPI):
         logger.info("📅 스케줄러 서비스 시작 완료")
     except Exception as e:
         logger.warning(f"⚠️ Scheduler service failed to start, but continuing: {e}")
+    
+    # 세션 정리 서비스 활성화 (비동기 수정 완료)
+    try:
+        await start_session_cleanup_service()
+        logger.info("🧹 세션 정리 서비스 시작 완료")
+    except Exception as e:
+        logger.warning(f"⚠️ Session cleanup service failed to start, but continuing: {e}")
 
     logger.info("✅ AIMEX API Server ready")
 
@@ -103,6 +112,13 @@ async def lifespan(app: FastAPI):
         logger.info("✅ 스케줄러 서비스가 정상적으로 중지되었습니다")
     except Exception as e:
         logger.error(f"❌ 스케줄러 서비스 중지 중 오류: {e}")
+    
+    # 세션 정리 서비스 활성화 (비동기 수정 완료)
+    try:
+        await stop_session_cleanup_service()
+        logger.info("✅ 세션 정리 서비스가 정상적으로 중지되었습니다")
+    except Exception as e:
+        logger.error(f"❌ 세션 정리 서비스 중지 중 오류: {e}")
 
 
 # FastAPI 애플리케이션 생성

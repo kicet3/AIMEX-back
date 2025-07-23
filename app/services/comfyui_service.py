@@ -85,7 +85,7 @@ class ComfyUIService(ImageGeneratorInterface):
         self.server_url = comfyui_server_url
         self.runpod_endpoint = runpod_endpoint
         self.client_id = str(uuid.uuid4())
-        self.use_mock = True  # 기본적으로 Mock 모드 (ComfyUI 서버 없을 때)
+        self.use_mock = False  # Mock 모드 비활성화 (실제 서비스만 구현)
         
         # ComfyUI 서버 연결 테스트
         self._test_connection()
@@ -103,13 +103,12 @@ class ComfyUIService(ImageGeneratorInterface):
         try:
             response = requests.get(f"{self.server_url}/system_stats", timeout=5)
             if response.status_code == 200:
-                self.use_mock = False
                 logger.info("ComfyUI server connection successful")
             else:
                 logger.warning(f"ComfyUI server responded with status {response.status_code}")
         except requests.exceptions.RequestException as e:
             logger.warning(f"ComfyUI server not available: {e}")
-            self.use_mock = True
+            # Mock 모드 사용하지 않음 - 실제 RunPod 서비스만 사용
     
     async def generate_image(self, request: ImageGenerationRequest) -> ImageGenerationResponse:
         """
@@ -118,31 +117,23 @@ class ComfyUIService(ImageGeneratorInterface):
         Clean Architecture: 비즈니스 로직과 외부 서비스 분리
         """
         try:
-            # RunPod 요청이거나 로컬 서버가 사용 가능한 경우 실제 생성
-            if request.use_runpod or not self.use_mock:
-                return await self._generate_real_image(request)
-            else:
-                return await self._generate_mock_image(request)
+            # 실제 이미지 생성만 수행 (Mock 모드 제거)
+            return await self._generate_real_image(request)
         except Exception as e:
             logger.error(f"Image generation failed: {e}")
-            # RunPod 요청 실패 시에도 오류 반환 (Mock으로 폴백하지 않음)
-            if request.use_runpod:
-                return ImageGenerationResponse(
-                    job_id=str(uuid.uuid4()),
-                    status="failed",
-                    images=[],
-                    prompt_used=request.prompt,
-                    metadata={"error": str(e), "runpod_failed": True}
-                )
-            # 로컬 서버 실패 시만 Mock으로 폴백
-            return await self._generate_mock_image(request)
+            # 실패 시 오류 반환 (Mock으로 폴백하지 않음)
+            return ImageGenerationResponse(
+                job_id=str(uuid.uuid4()),
+                status="failed",
+                images=[],
+                prompt_used=request.prompt,
+                metadata={"error": str(e), "generation_failed": True}
+            )
     
     async def get_generation_status(self, job_id: str) -> ImageGenerationResponse:
         """생성 상태 조회"""
-        if self.use_mock:
-            return await self._get_mock_status(job_id)
-        else:
-            return await self._get_real_status(job_id)
+        # Mock 모드 제거 - 실제 상태 조회만 수행
+        return await self._get_real_status(job_id)
     
     async def _generate_real_image(self, request: ImageGenerationRequest) -> ImageGenerationResponse:
         """실제 ComfyUI API 호출 (RunPod 지원, pod_id로 동적 endpoint_url 사용)"""
@@ -205,48 +196,59 @@ class ComfyUIService(ImageGeneratorInterface):
             logger.error(f"[ComfyUI] 이미지 생성 실패: {e}")
             raise
     
-    async def _generate_mock_image(self, request: ImageGenerationRequest) -> ImageGenerationResponse:
-        """Mock 이미지 생성 (ComfyUI 서버 없을 때)"""
-        
-        # 시뮬레이션 지연
-        await asyncio.sleep(2)
-        
-        job_id = str(uuid.uuid4())
-        
-        # Mock 이미지 URL (실제로는 생성된 이미지)
-        mock_images = [
-            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",  # 1x1 픽셀 이미지
-        ]
-        
-        return ImageGenerationResponse(
-            job_id=job_id,
-            status="completed",
-            images=mock_images,
-            prompt_used=request.prompt,
-            generation_time=2.0,
-            metadata={
-                "note": "Mock image generation - 실제 ComfyUI 서버 연결 시 실제 이미지가 생성됩니다",
-                "mock_data": True,
-                "prompt": request.prompt,
-                "settings": request.dict()
-            }
-        )
-    
-    async def _get_mock_status(self, job_id: str) -> ImageGenerationResponse:
-        """Mock 상태 조회"""
-        return ImageGenerationResponse(
-            job_id=job_id,
-            status="completed",
-            images=["mock_image_url"],
-            prompt_used="mock prompt",
-            metadata={"mock_data": True}
-        )
     
     async def _get_real_status(self, job_id: str) -> ImageGenerationResponse:
         """실제 상태 조회"""
-        # 실제 ComfyUI 상태 조회 로직
-        # 구현 필요
-        pass
+        try:
+            # 히스토리 조회를 통한 상태 확인
+            history_response = requests.get(f"{self.server_url}/history/{job_id}")
+            if history_response.status_code == 200:
+                history_data = history_response.json()
+                if job_id in history_data:
+                    # 완료된 작업
+                    result = history_data[job_id]
+                    images = self._extract_images_from_history(result)
+                    return ImageGenerationResponse(
+                        job_id=job_id,
+                        status="completed",
+                        images=images,
+                        prompt_used="",
+                        metadata={"history_data": result}
+                    )
+            
+            # 진행 중인 작업 확인
+            queue_response = requests.get(f"{self.server_url}/queue")
+            if queue_response.status_code == 200:
+                queue_data = queue_response.json()
+                # 큐에서 job_id 찾기
+                for item in queue_data.get("queue_running", []) + queue_data.get("queue_pending", []):
+                    if len(item) > 1 and item[1] == job_id:
+                        return ImageGenerationResponse(
+                            job_id=job_id,
+                            status="processing",
+                            images=[],
+                            prompt_used="",
+                            metadata={"queue_status": "in_progress"}
+                        )
+            
+            # 상태를 찾을 수 없음
+            return ImageGenerationResponse(
+                job_id=job_id,
+                status="not_found",
+                images=[],
+                prompt_used="",
+                metadata={"error": "Job not found in history or queue"}
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to get real status: {e}")
+            return ImageGenerationResponse(
+                job_id=job_id,
+                status="error",
+                images=[],
+                prompt_used="",
+                metadata={"error": str(e)}
+            )
     
     async def _create_custom_workflow(self, request: ImageGenerationRequest) -> Dict[str, Any]:
         """
