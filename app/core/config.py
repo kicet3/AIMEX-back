@@ -133,23 +133,10 @@ class Settings(BaseSettings):
     OPENAI_WEBHOOK_URL: str = os.getenv("OPENAI_WEBHOOK_URL", "http://localhost:8000/api/v1/influencers/webhooks/openai/batch-complete")
     
     # VLLM 서버 설정
-    VLLM_ENABLED: bool = False
-    VLLM_HOST: str = "localhost"
-    VLLM_PORT: int = 8000
+    VLLM_ENABLED: bool = True
     VLLM_TIMEOUT: int = 300
-    VLLM_SERVER_URL: Optional[str] = None
-    VLLM_BASE_URL: Optional[str] = None
-
-    @model_validator(mode='after')
-    def compute_vllm_base_url(self) -> 'Settings':
-        if self.VLLM_ENABLED:
-            if self.VLLM_SERVER_URL:
-                self.VLLM_BASE_URL = self.VLLM_SERVER_URL
-            else:
-                self.VLLM_BASE_URL = f"http://{self.VLLM_HOST}:{self.VLLM_PORT}"
-        else:
-            self.VLLM_BASE_URL = None
-        return self
+    VLLM_BASE_URL: str = os.getenv("VLLM_BASE_URL", "http://localhost:8000")
+    
     # 추가 환경 변수들 (누락된 것들)
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
     APP_NAME: str = os.getenv("APP_NAME", "AIMEX Backend")
