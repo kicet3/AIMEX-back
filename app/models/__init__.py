@@ -14,7 +14,7 @@ from .influencer import (
     BatchKey,
     ChatMessage,
     InfluencerAPI,
-    APICallAggregation
+    APICallAggregation,
 )
 
 # 게시글 관련 모델들
@@ -23,20 +23,25 @@ from .board import Board
 # 음성 관련 모델들
 from .voice import VoiceBase, GeneratedVoice
 
+# MCP 서버 관련 모델들
+from .mcp_server import MCPServer
+
 # vLLM에서 공유하는 Enum들 import
 try:
     import sys
     import os
-    
+
     # vLLM 경로 추가
-    vllm_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '..', 'vllm')
+    vllm_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "..", "vllm"
+    )
     sys.path.insert(0, vllm_path)
-    
+
     from app.models import FineTuningStatus
 except ImportError:
     # 폴백: 로컬 버전
     from enum import Enum
-    
+
     class FineTuningStatus(Enum):
         PENDING = "pending"
         PREPARING_DATA = "preparing_data"
@@ -45,12 +50,13 @@ except ImportError:
         COMPLETED = "completed"
         FAILED = "failed"
 
+
 # 모든 모델을 한 곳에서 export
 __all__ = [
     "Base",
     "TimestampMixin",
     "User",
-    "Team", 
+    "Team",
     "HFTokenManage",
     "SystemLog",
     "ModelMBTI",
@@ -63,5 +69,6 @@ __all__ = [
     "Board",
     "VoiceBase",
     "GeneratedVoice",
-    "FineTuningStatus"
+    "MCPServer",
+    "FineTuningStatus",
 ]

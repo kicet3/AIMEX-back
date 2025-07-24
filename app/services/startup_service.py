@@ -52,21 +52,23 @@ class StartupService:
                 "🔒 자동 파인튜닝이 비활성화되어 있습니다 (AUTO_FINETUNING_ENABLED=false)"
             )
             return 0
-        
+
         # vLLM 서버 연결 대기 (최대 30초)
         logger.info("⏳ vLLM 서버 연결 대기 중...")
         max_retries = 6  # 5초 * 6회 = 30초
         retry_delay = 5  # 초
-        
+
         from app.services.vllm_client import vllm_health_check
-        
+
         for i in range(max_retries):
             if await vllm_health_check():
                 logger.info("✅ vLLM 서버 연결 성공!")
                 break
             else:
                 if i < max_retries - 1:
-                    logger.warning(f"⏳ vLLM 서버 연결 실패, {retry_delay}초 후 재시도... ({i+1}/{max_retries})")
+                    logger.warning(
+                        f"⏳ vLLM 서버 연결 실패, {retry_delay}초 후 재시도... ({i+1}/{max_retries})"
+                    )
                     await asyncio.sleep(retry_delay)
                 else:
                     logger.error("❌ vLLM 서버 연결 실패 - 파인튜닝 재시작 건너뜀")
@@ -204,19 +206,21 @@ class StartupService:
                         # 인플루언서 정보 조회 (권한 체크 없이 직접 조회)
                         influencer_data = (
                             db.query(AIInfluencer)
-                            .filter(AIInfluencer.influencer_id == batch_job.influencer_id)
+                            .filter(
+                                AIInfluencer.influencer_id == batch_job.influencer_id
+                            )
                             .first()
                         )
-                        
+
                         if not influencer_data:
                             logger.warning(
                                 f"⚠️ 인플루언서를 찾을 수 없음: {batch_job.influencer_id}"
                             )
                             continue
-                        
+
                         # 인플루언서의 그룹에 속한 사용자 찾기 (권한 체크용)
                         from app.models.user import User, Team
-                        
+
                         # user_id를 사용하는 경우
                         if influencer_data.user_id:
                             user_id_for_check = influencer_data.user_id
@@ -241,10 +245,10 @@ class StartupService:
                                 f"⚠️ 인플루언서 {batch_job.influencer_id}에 user_id나 group_id가 없음"
                             )
                             continue
-                        
+
                         # get_influencer_by_id를 사용하여 권한 체크
                         from app.services.influencers.crud import get_influencer_by_id
-                        
+
                         try:
                             influencer_data = get_influencer_by_id(
                                 db, user_id_for_check, batch_job.influencer_id
@@ -282,9 +286,7 @@ class StartupService:
 
                         # 원본 URL 그대로 사용 (파일이 실제로 존재하는 경로)
                         if s3_qa_url and "generated_qa_results.jsonl" in s3_qa_url:
-                            logger.info(
-                                f"✅ 원본 QA 파일 URL 사용: {s3_qa_url}"
-                            )
+                            logger.info(f"✅ 원본 QA 파일 URL 사용: {s3_qa_url}")
 
                         # 파인튜닝 시작 (task_id 전달)
                         try:
@@ -297,7 +299,7 @@ class StartupService:
                         except Exception as fe:
                             logger.error(
                                 f"❌ 파인튜닝 시작 중 예외 발생: {type(fe).__name__}: {str(fe)}",
-                                exc_info=True
+                                exc_info=True,
                             )
                             success = False
 
@@ -321,7 +323,7 @@ class StartupService:
                     except Exception as e:
                         logger.error(
                             f"❌ 파인튜닝 재시작 중 오류: task_id={batch_job.task_id}, error={str(e)}",
-                            exc_info=True  # 전체 스택 트레이스 출력
+                            exc_info=True,  # 전체 스택 트레이스 출력
                         )
                         db.rollback()  # 오류 발생 시 롤백
                         continue
@@ -441,8 +443,10 @@ class StartupService:
                 for influencer in chat_enabled_influencers:
                     try:
                         # 중앙화된 토큰 리졸버 사용
-                        hf_token, hf_username = await get_token_for_influencer(influencer, db)
-                        
+                        hf_token, hf_username = await get_token_for_influencer(
+                            influencer, db
+                        )
+
                         if not hf_token:
                             logger.warning(
                                 f"⚠️ 인플루언서 {influencer.influencer_id}의 HF 토큰을 찾을 수 없습니다."
@@ -450,9 +454,7 @@ class StartupService:
                             continue
 
                         # vLLM 어댑터 로드
-                        logger.info(
-                            f"🔄 어댑터 로드 중: {influencer.influencer_id}"
-                        )
+                        logger.info(f"🔄 어댑터 로드 중: {influencer.influencer_id}")
                         success = await vllm_load_adapter_if_needed(
                             model_id=influencer.influencer_id,
                             hf_repo_name=influencer.influencer_model_repo,
@@ -524,8 +526,10 @@ class StartupService:
                     print(influencer.group_id)
                     try:
                         # 중앙화된 토큰 리졸버 사용
-                        hf_token, hf_username = await get_token_for_influencer(influencer, db)
-                        
+                        hf_token, hf_username = await get_token_for_influencer(
+                            influencer, db
+                        )
+
                         if not hf_token:
                             logger.warning(
                                 f"⚠️ 인플루언서 {influencer.influencer_name}의 HF 토큰을 찾을 수 없습니다."

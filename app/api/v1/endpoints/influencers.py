@@ -7,7 +7,7 @@ from fastapi import (
     UploadFile,
     File,
     Form,
-    Header
+    Header,
 )
 
 from sqlalchemy.orm import Session
@@ -86,35 +86,33 @@ logger = logging.getLogger(__name__)
 async def verify_api_key(
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     authorization: Optional[str] = Header(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ) -> AIInfluencer:
     """API 키를 검증하고 해당 인플루언서를 반환합니다."""
-    
+
     # API 키 추출 (헤더에서)
     api_key = None
-    
+
     # X-API-Key 헤더 확인
     if x_api_key:
         api_key = x_api_key
     # Authorization 헤더에서 Bearer 토큰 확인
     elif authorization and authorization.startswith("Bearer "):
         api_key = authorization[7:]  # "Bearer " 제거
-    
+
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="API key is required",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     try:
         # API 키로 인플루언서 조회
         influencer_api = (
-            db.query(InfluencerAPI)
-            .filter(InfluencerAPI.api_value == api_key)
-            .first()
+            db.query(InfluencerAPI).filter(InfluencerAPI.api_value == api_key).first()
         )
-        
+
         if not influencer_api:
             logger.warning(f"❌ 잘못된 API 키 시도: {api_key[:10]}...")
             raise HTTPException(
@@ -122,30 +120,36 @@ async def verify_api_key(
                 detail="Invalid API key",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        
+
         # 인플루언서 정보 조회
         influencer = (
             db.query(AIInfluencer)
             .filter(AIInfluencer.influencer_id == influencer_api.influencer_id)
             .first()
         )
-        
+
         if not influencer:
-            logger.error(f"❌ API 키는 유효하지만 인플루언서를 찾을 수 없음: {influencer_api.influencer_id}")
+            logger.error(
+                f"❌ API 키는 유효하지만 인플루언서를 찾을 수 없음: {influencer_api.influencer_id}"
+            )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Influencer not found",
             )
-        
+
         # 인플루언서가 사용 가능한 상태인지 확인 (학습 상태와 관계없이 접근 허용)
         if influencer.learning_status is None:
-            logger.warning(f"⚠️ 학습 상태가 설정되지 않은 인플루언서 접근: {influencer.influencer_name}")
+            logger.warning(
+                f"⚠️ 학습 상태가 설정되지 않은 인플루언서 접근: {influencer.influencer_name}"
+            )
         elif influencer.learning_status != 1:
-            logger.info(f"ℹ️ 학습 중인 인플루언서 접근: {influencer.influencer_name} (status: {influencer.learning_status})")
-        
+            logger.info(
+                f"ℹ️ 학습 중인 인플루언서 접근: {influencer.influencer_name} (status: {influencer.learning_status})"
+            )
+
         logger.info(f"✅ API 키 인증 성공: {influencer.influencer_name}")
         return influencer
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -169,40 +173,42 @@ async def get_style_presets_list(
     try:
         # StylePreset과 ModelMBTI를 조인하여 조회
         from app.models.influencer import StylePreset, ModelMBTI, AIInfluencer
-        
+
         # 프리셋과 MBTI 정보를 함께 조회
         presets_with_mbti = []
         presets = db.query(StylePreset).offset(skip).limit(limit).all()
-        
+
         for preset in presets:
             # 해당 프리셋을 사용하는 인플루언서들의 MBTI 정보 수집
             # 가장 많이 사용되는 MBTI를 찾기 위해 서브쿼리 사용
             from sqlalchemy import func
-            
-            mbti_counts = db.query(
-                ModelMBTI.mbti_id,
-                ModelMBTI.mbti_name,
-                ModelMBTI.mbti_traits,
-                ModelMBTI.mbti_speech,
-                func.count(AIInfluencer.influencer_id).label('count')
-            ).join(
-                AIInfluencer, 
-                ModelMBTI.mbti_id == AIInfluencer.mbti_id
-            ).filter(
-                AIInfluencer.style_preset_id == preset.style_preset_id,
-                AIInfluencer.mbti_id.isnot(None)
-            ).group_by(
-                ModelMBTI.mbti_id,
-                ModelMBTI.mbti_name,
-                ModelMBTI.mbti_traits,
-                ModelMBTI.mbti_speech
-            ).order_by(
-                func.count(AIInfluencer.influencer_id).desc()
-            ).first()
-            
+
+            mbti_counts = (
+                db.query(
+                    ModelMBTI.mbti_id,
+                    ModelMBTI.mbti_name,
+                    ModelMBTI.mbti_traits,
+                    ModelMBTI.mbti_speech,
+                    func.count(AIInfluencer.influencer_id).label("count"),
+                )
+                .join(AIInfluencer, ModelMBTI.mbti_id == AIInfluencer.mbti_id)
+                .filter(
+                    AIInfluencer.style_preset_id == preset.style_preset_id,
+                    AIInfluencer.mbti_id.isnot(None),
+                )
+                .group_by(
+                    ModelMBTI.mbti_id,
+                    ModelMBTI.mbti_name,
+                    ModelMBTI.mbti_traits,
+                    ModelMBTI.mbti_speech,
+                )
+                .order_by(func.count(AIInfluencer.influencer_id).desc())
+                .first()
+            )
+
             # MBTI 정보가 있으면 가장 많이 사용되는 것을 사용, 없으면 None
             mbti_info = mbti_counts if mbti_counts else None
-            
+
             # 프리셋 데이터를 딕셔너리로 변환
             preset_dict = {
                 "style_preset_id": preset.style_preset_id,
@@ -220,9 +226,9 @@ async def get_style_presets_list(
                 "mbti_traits": mbti_info.mbti_traits if mbti_info else None,
                 "mbti_speech": mbti_info.mbti_speech if mbti_info else None,
             }
-            
+
             presets_with_mbti.append(StylePresetWithMBTI(**preset_dict))
-        
+
         logger.info(f"✅ 프리셋 조회 성공 - 개수: {len(presets_with_mbti)}")
         return presets_with_mbti
     except Exception as e:
@@ -1033,8 +1039,9 @@ async def handle_finetuning_webhook(
         if webhook_data.status == "completed":
             # 허깅페이스 URL에서 레포 경로만 추출
             from app.utils.hf_utils import extract_hf_repo_path
+
             hf_repo_path = extract_hf_repo_path(webhook_data.hf_model_url)
-            
+
             batch_key_entry.status = QAGenerationStatus.FINALIZED.value
             batch_key_entry.hf_model_url = hf_repo_path  # 레포 경로만 저장
             batch_key_entry.completed_at = datetime.now()
@@ -1112,8 +1119,10 @@ async def regenerate_conversation_tones(
 
     return await ToneGenerationService.generate_conversation_tones(request, True)
 
-async def _generate_question_for_character(client: OpenAI, character_info: str, temperature: float = 0.6) -> str:
 
+async def _generate_question_for_character(
+    client: OpenAI, character_info: str, temperature: float = 0.6
+) -> str:
     """캐릭터 정보에 어울리는 질문을 GPT가 생성하도록 합니다."""
     prompt = f"""
 당신은 아래 캐릭터 정보를 바탕으로, 이 캐릭터가 가장 잘 드러날 수 있는 상황이나 일상적인 질문 하나를 한 문장으로 작성해주세요.
@@ -1141,6 +1150,7 @@ async def _generate_question_for_character(client: OpenAI, character_info: str, 
     )
 
     return response.choices[0].message.content.strip()
+
 
 @router.post("/{influencer_id}/system-prompt")
 async def save_system_prompt(
@@ -1251,16 +1261,24 @@ async def generate_api_key(
             f"❌ API 키 생성 실패 - 인플루언서가 존재하지 않음: influencer_id: {influencer_id}"
         )
         raise HTTPException(status_code=404, detail="Influencer not found")
-    
+
     # 팀 권한 체크 (같은 팀에 속한 사용자도 접근 가능)
     try:
-        check_team_resource_permission(current_user, str(influencer_exists.user_id), db=db)
+        check_team_resource_permission(
+            current_user, str(influencer_exists.user_id), db=db
+        )
         influencer = influencer_exists
-        logger.info(f"✅ 팀 권한 확인 성공 - influencer_id: {influencer_id}, user_id: {user_id}")
+        logger.info(
+            f"✅ 팀 권한 확인 성공 - influencer_id: {influencer_id}, user_id: {user_id}"
+        )
     except HTTPException as e:
-        logger.error(f"❌ API 키 생성 실패 - 팀 권한 없음: influencer_id: {influencer_id}, user_id: {user_id}, 실제 소유자: {influencer_exists.user_id}")
-        raise HTTPException(status_code=403, detail="인플루언서에 대한 접근 권한이 없습니다.")
-    
+        logger.error(
+            f"❌ API 키 생성 실패 - 팀 권한 없음: influencer_id: {influencer_id}, user_id: {user_id}, 실제 소유자: {influencer_exists.user_id}"
+        )
+        raise HTTPException(
+            status_code=403, detail="인플루언서에 대한 접근 권한이 없습니다."
+        )
+
     # 인플루언서가 사용 가능한 상태인지 확인
     if influencer.learning_status != 1:
         logger.warning(
@@ -1311,6 +1329,7 @@ async def generate_api_key(
         raise HTTPException(
             status_code=500, detail="API 키 생성 중 오류가 발생했습니다."
         )
+
 
 @router.get("/{influencer_id}/api-key", response_model=APIKeyInfo)
 async def get_api_key(
@@ -1490,44 +1509,61 @@ async def chat_with_influencer(
     try:
         # API 사용량 추적
         await track_api_usage(db, str(api_key.influencer_id))
-        
+
         # VLLM 서비스 호출
         try:
-            from app.services.vllm_client import vllm_generate_response, vllm_health_check
-            
+            from app.services.vllm_client import (
+                vllm_generate_response,
+                vllm_health_check,
+            )
+
             # VLLM 서버 상태 확인
             if not await vllm_health_check():
                 logger.warning("VLLM 서버에 연결할 수 없어 기본 응답을 사용합니다.")
                 response_text = f"안녕하세요! 저는 {api_key.influencer_name}입니다. '{request.message}'에 대한 답변을 드리겠습니다."
             else:
                 # 시스템 프롬프트 구성
-                system_message = str(api_key.system_prompt) if api_key.system_prompt is not None else f"당신은 {api_key.influencer_name}입니다. 친근하고 도움이 되는 답변을 해주세요."
-                
+                system_message = (
+                    str(api_key.system_prompt)
+                    if api_key.system_prompt is not None
+                    else f"당신은 {api_key.influencer_name}입니다. 친근하고 도움이 되는 답변을 해주세요."
+                )
+
                 # VLLM 서버에서 응답 생성
                 if api_key.influencer_model_repo:
                     model_id = str(api_key.influencer_model_repo)
-                    
+
                     # HF 토큰 가져오기
                     from app.models.user import HFTokenManage
                     from app.core.encryption import decrypt_sensitive_data
-                    
+
                     hf_token = None
-                    if hasattr(api_key, 'group_id') and api_key.group_id:
-                        hf_token_manage = db.query(HFTokenManage).filter(
-                            HFTokenManage.group_id == api_key.group_id
-                        ).order_by(HFTokenManage.created_at.desc()).first()
-                        
+                    if hasattr(api_key, "group_id") and api_key.group_id:
+                        hf_token_manage = (
+                            db.query(HFTokenManage)
+                            .filter(HFTokenManage.group_id == api_key.group_id)
+                            .order_by(HFTokenManage.created_at.desc())
+                            .first()
+                        )
+
                         if hf_token_manage:
-                            hf_token = decrypt_sensitive_data(str(hf_token_manage.hf_token_value))
-                    
+                            hf_token = decrypt_sensitive_data(
+                                str(hf_token_manage.hf_token_value)
+                            )
+
                     # VLLM 클라이언트 가져오기
                     from app.services.vllm_client import get_vllm_client
+
                     vllm_client = await get_vllm_client()
-                    
+
                     # 어댑터 로드
                     try:
                         # model_id는 인플루언서 ID로, hf_repo_name은 실제 레포지토리 경로로 사용
-                        await vllm_client.load_adapter(model_id=str(api_key.influencer_id), hf_repo_name=model_id, hf_token=hf_token)
+                        await vllm_client.load_adapter(
+                            model_id=str(api_key.influencer_id),
+                            hf_repo_name=model_id,
+                            hf_token=hf_token,
+                        )
                         logger.info(f"✅ VLLM 어댑터 로드 완료: {model_id}")
                     except Exception as e:
                         logger.warning(f"⚠️ 어댑터 로드 실패, 기본 모델 사용: {e}")
@@ -1535,42 +1571,43 @@ async def chat_with_influencer(
                         model_id = str(api_key.influencer_id)
                 else:
                     model_id = str(api_key.influencer_id)
-                
+
                 response_text = await vllm_generate_response(
                     user_message=request.message,
                     system_message=system_message,
                     influencer_name=str(api_key.influencer_name),
                     model_id=model_id,
                     max_new_tokens=200,
-                    temperature=0.7
+                    temperature=0.7,
                 )
-                
+
                 logger.info(f"✅ VLLM 응답 생성 성공: {api_key.influencer_name}")
-                
+
         except Exception as e:
             logger.error(f"❌ VLLM 응답 생성 실패: {e}")
             # VLLM 실패 시 기본 응답 사용
             response_text = f"안녕하세요! 저는 {api_key.influencer_name}입니다. '{request.message}'에 대한 답변을 드리겠습니다."
-        
+
         return {
             "success": True,
             "response": response_text,
             "influencer_name": api_key.influencer_name,
             "message": request.message,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
 
     except Exception as e:
-        logger.error(f"❌ 챗봇 대화 실패 - influencer_id: {api_key.influencer_id}, error: {str(e)}")
+        logger.error(
+            f"❌ 챗봇 대화 실패 - influencer_id: {api_key.influencer_id}, error: {str(e)}"
+        )
         raise HTTPException(status_code=500, detail="챗봇 대화 중 오류가 발생했습니다.")
-
 
 
 async def track_api_usage(db: Session, influencer_id: str):
     """API 사용량을 추적하여 APICallAggregation 테이블에 기록"""
     try:
         from datetime import date
-        
+
         # 해당 인플루언서의 API 키 조회
         api_key = (
             db.query(InfluencerAPI)
@@ -1581,12 +1618,11 @@ async def track_api_usage(db: Session, influencer_id: str):
         if not api_key:
             logger.warning(f"API 키를 찾을 수 없음 - influencer_id: {influencer_id}")
             return
-        
+
         today = date.today()
-        
+
         # 오늘 날짜의 기존 집계 데이터 조회
         existing_aggregation = (
-
             db.query(APICallAggregation)
             .filter(
                 APICallAggregation.api_id == api_key.api_id,
@@ -1595,12 +1631,13 @@ async def track_api_usage(db: Session, influencer_id: str):
             .first()
         )
 
-        
         if existing_aggregation:
             # 기존 데이터가 있으면 호출 횟수 증가
             existing_aggregation.daily_call_count += 1
             existing_aggregation.updated_at = datetime.utcnow()
-            logger.info(f"✅ API 사용량 업데이트 - influencer_id: {influencer_id}, daily_calls: {existing_aggregation.daily_call_count}")
+            logger.info(
+                f"✅ API 사용량 업데이트 - influencer_id: {influencer_id}, daily_calls: {existing_aggregation.daily_call_count}"
+            )
 
         else:
             # 새로운 집계 데이터 생성
@@ -1608,18 +1645,20 @@ async def track_api_usage(db: Session, influencer_id: str):
                 api_id=api_key.api_id,
                 influencer_id=influencer_id,
                 daily_call_count=1,
-
                 created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow()
+                updated_at=datetime.utcnow(),
             )
             db.add(new_aggregation)
-            logger.info(f"✅ 새로운 API 사용량 기록 생성 - influencer_id: {influencer_id}, daily_calls: 1")
-        
+            logger.info(
+                f"✅ 새로운 API 사용량 기록 생성 - influencer_id: {influencer_id}, daily_calls: 1"
+            )
+
         db.commit()
-        
 
     except Exception as e:
-        logger.error(f"❌ API 사용량 추적 실패 - influencer_id: {influencer_id}, error: {str(e)}")
+        logger.error(
+            f"❌ API 사용량 추적 실패 - influencer_id: {influencer_id}, error: {str(e)}"
+        )
         db.rollback()
 
 
@@ -1628,6 +1667,7 @@ class VoiceUploadRequest(BaseModel):
     file_data: str  # Base64 encoded file data
     file_name: str
     file_type: str
+
 
 # 음성 관련 API 엔드포인트
 @router.post("/{influencer_id}/voice/base")
@@ -1642,63 +1682,68 @@ async def upload_base_voice(
     user_id = current_user.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found")
-    
+
     # 인플루언서 존재 확인
     influencer = get_influencer_by_id(db, user_id, influencer_id)
     if not influencer:
         raise HTTPException(status_code=404, detail="인플루언서를 찾을 수 없습니다")
-    
+
     # 파일 타입 검증
-    if not request.file_type.startswith('audio/'):
+    if not request.file_type.startswith("audio/"):
         raise HTTPException(status_code=400, detail="오디오 파일만 업로드 가능합니다")
-    
+
     # Base64 디코딩
     import base64
+
     try:
         contents = base64.b64decode(request.file_data)
     except Exception as e:
         raise HTTPException(status_code=400, detail="잘못된 파일 데이터 형식입니다")
-    
+
     # 오디오를 WAV로 변환
     from app.utils.audio_converter import convert_to_wav, validate_audio_for_tts
+
     try:
         wav_data, wav_filename = convert_to_wav(contents, request.file_name)
-        
+
         # TTS용 검증
         is_valid, validation_message = validate_audio_for_tts(wav_data)
         if not is_valid:
             raise HTTPException(status_code=400, detail=validation_message)
-            
+
         contents = wav_data  # WAV 데이터로 교체
         file_size = len(contents)
-        
+
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    
+
     # 파일 크기 검증 (10MB)
     if file_size > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="파일 크기는 10MB 이하여야 합니다")
-    
+
     # S3 키 생성 (audio_base/influencer_id/base.wav)
     s3_key = f"audio_base/{influencer_id}/base.wav"
-    
+
     # 임시 파일로 저장
     import tempfile
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
         tmp_file.write(contents)
         tmp_file_path = tmp_file.name
-    
+
     try:
         # S3에 업로드 (WAV 파일로)
         s3_url = s3_service.upload_file(tmp_file_path, s3_key, content_type="audio/wav")
         if not s3_url:
             raise HTTPException(status_code=500, detail="S3 업로드 실패")
-        
+
         # 기존 베이스 음성이 있는지 확인
-        existing_voice = db.query(VoiceBase).filter(
-            VoiceBase.influencer_id == influencer.influencer_id
-        ).first()
-        
+        existing_voice = (
+            db.query(VoiceBase)
+            .filter(VoiceBase.influencer_id == influencer.influencer_id)
+            .first()
+        )
+
         if existing_voice:
             # 기존 음성 업데이트
             existing_voice.file_name = wav_filename
@@ -1715,20 +1760,20 @@ async def upload_base_voice(
                 file_size=file_size,
                 file_type="audio/wav",
                 s3_url=s3_url,
-                s3_key=s3_key
+                s3_key=s3_key,
             )
             db.add(new_voice)
-        
+
         db.commit()
-        
+
         return {
             "message": "베이스 음성이 성공적으로 업로드되었습니다 (WAV로 변환됨)",
             "s3_url": s3_url,
             "file_name": wav_filename,
             "file_size": file_size,
-            "original_filename": request.file_name
+            "original_filename": request.file_name,
         }
-        
+
     except Exception as e:
         logger.error(f"베이스 음성 업로드 실패: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1749,17 +1794,19 @@ async def get_base_voice(
     user_id = current_user.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found")
-    
+
     # 인플루언서 존재 확인
     influencer = get_influencer_by_id(db, user_id, influencer_id)
     if not influencer:
         raise HTTPException(status_code=404, detail="인플루언서를 찾을 수 없습니다")
-    
+
     # 베이스 음성 조회
-    base_voice = db.query(VoiceBase).filter(
-        VoiceBase.influencer_id == influencer.influencer_id
-    ).first()
-    
+    base_voice = (
+        db.query(VoiceBase)
+        .filter(VoiceBase.influencer_id == influencer.influencer_id)
+        .first()
+    )
+
     if not base_voice:
         # 음성이 없는 것은 정상적인 상황이므로 200으로 응답
         return {
@@ -1769,24 +1816,26 @@ async def get_base_voice(
             "created_at": None,
             "updated_at": None,
             "has_voice": False,
-            "message": "베이스 음성이 아직 설정되지 않았습니다"
+            "message": "베이스 음성이 아직 설정되지 않았습니다",
         }
-    
+
     # Presigned URL 생성
     presigned_url = None
     if base_voice.s3_key:
-        presigned_url = s3_service.generate_presigned_url(base_voice.s3_key, expiration=3600)
-    
+        presigned_url = s3_service.generate_presigned_url(
+            base_voice.s3_key, expiration=3600
+        )
+
     # presigned URL이 없으면 기존 URL 사용
     voice_url = presigned_url or base_voice.s3_url
-    
+
     return {
         "base_voice_url": voice_url,
         "file_name": base_voice.file_name,
         "file_size": base_voice.file_size,
         "created_at": base_voice.created_at.isoformat(),
         "updated_at": base_voice.updated_at.isoformat(),
-        "has_voice": True
+        "has_voice": True,
     }
 
 
@@ -1803,40 +1852,49 @@ async def get_generated_voices(
     user_id = current_user.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found")
-    
+
     # 인플루언서 존재 확인
     influencer = get_influencer_by_id(db, user_id, influencer_id)
     if not influencer:
         raise HTTPException(status_code=404, detail="인플루언서를 찾을 수 없습니다")
-    
+
     # 생성된 음성 목록 조회
-    voices = db.query(GeneratedVoice).filter(
-        GeneratedVoice.influencer_id == influencer.influencer_id
-    ).order_by(GeneratedVoice.created_at.desc()).offset(skip).limit(limit).all()
-    
+    voices = (
+        db.query(GeneratedVoice)
+        .filter(GeneratedVoice.influencer_id == influencer.influencer_id)
+        .order_by(GeneratedVoice.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
     # 각 음성에 대해 presigned URL 생성
     result = []
     for voice in voices:
         presigned_url = None
         if voice.s3_key:
-            presigned_url = s3_service.generate_presigned_url(voice.s3_key, expiration=3600)
-        
+            presigned_url = s3_service.generate_presigned_url(
+                voice.s3_key, expiration=3600
+            )
+
         # presigned URL이 없으면 기존 URL 사용
         voice_url = presigned_url or voice.s3_url
-        
-        result.append({
-            "id": str(voice.id),
-            "text": voice.text,
-            "url": voice_url,  # 프론트엔드와 일치하도록 url로 변경
-            "s3_url": voice_url,  # 호환성을 위해 유지
-            "duration": voice.duration,
-            "file_size": voice.file_size,
-            "status": voice.status if hasattr(voice, 'status') else "completed",
-            "task_id": voice.task_id if hasattr(voice, 'task_id') else None,
-            "createdAt": voice.created_at.isoformat(),  # 프론트엔드 형식
-            "created_at": voice.created_at.isoformat()  # 호환성을 위해 유지
-        })
-    
+
+        result.append(
+            {
+                "id": str(voice.id),
+                "text": voice.text,
+                "url": voice_url,  # 프론트엔드와 일치하도록 url로 변경
+                "s3_url": voice_url,  # 호환성을 위해 유지
+                "duration": voice.duration,
+                "file_size": voice.file_size,
+                "status": voice.status if hasattr(voice, "status") else "completed",
+                "task_id": voice.task_id if hasattr(voice, "task_id") else None,
+                "createdAt": voice.created_at.isoformat(),  # 프론트엔드 형식
+                "created_at": voice.created_at.isoformat(),  # 호환성을 위해 유지
+            }
+        )
+
     return result
 
 
@@ -1851,22 +1909,24 @@ async def delete_generated_voice(
     user_id = current_user.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found")
-    
+
     # 음성 조회
-    voice = db.query(GeneratedVoice).filter(
-        GeneratedVoice.id == voice_id
-    ).first()
-    
+    voice = db.query(GeneratedVoice).filter(GeneratedVoice.id == voice_id).first()
+
     if not voice:
         raise HTTPException(status_code=404, detail="음성을 찾을 수 없습니다")
-    
-    influencer = db.query(AIInfluencer).filter(
-        AIInfluencer.influencer_id == voice.influencer_id,
-    ).first()
-    
+
+    influencer = (
+        db.query(AIInfluencer)
+        .filter(
+            AIInfluencer.influencer_id == voice.influencer_id,
+        )
+        .first()
+    )
+
     if not influencer:
         raise HTTPException(status_code=403, detail="권한이 없습니다")
-    
+
     # S3에서 파일 삭제
     if voice.s3_key and s3_service.is_available():
         try:
@@ -1875,13 +1935,13 @@ async def delete_generated_voice(
         except Exception as e:
             logger.error(f"S3 파일 삭제 실패: {voice.s3_key}, 에러: {str(e)}")
             # S3 삭제 실패해도 DB 삭제는 진행
-    
+
     # 데이터베이스에서 완전 삭제
     db.delete(voice)
     db.commit()
-    
+
     logger.info(f"음성 완전 삭제 완료: voice_id={voice_id}")
-    
+
     return {"message": "음성이 삭제되었습니다"}
 
 
@@ -1896,42 +1956,45 @@ async def get_voice_download_url(
     user_id = current_user.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found")
-    
+
     # 음성 조회
-    voice = db.query(GeneratedVoice).filter(
-        GeneratedVoice.id == voice_id
-    ).first()
-    
+    voice = db.query(GeneratedVoice).filter(GeneratedVoice.id == voice_id).first()
+
     if not voice:
         raise HTTPException(status_code=404, detail="음성을 찾을 수 없습니다")
-    
+
     # 소유자 확인
-    influencer = db.query(AIInfluencer).filter(
-        AIInfluencer.influencer_id == voice.influencer_id,
-        AIInfluencer.user_id == user_id
-    ).first()
-    
+    influencer = (
+        db.query(AIInfluencer)
+        .filter(
+            AIInfluencer.influencer_id == voice.influencer_id,
+            AIInfluencer.user_id == user_id,
+        )
+        .first()
+    )
+
     if not influencer:
         raise HTTPException(status_code=403, detail="권한이 없습니다")
-    
+
     # 다운로드용 presigned URL 생성
     if voice.s3_key and s3_service.is_available():
         try:
             # Content-Disposition 헤더를 포함한 presigned URL 생성
             presigned_url = s3_service.s3_client.generate_presigned_url(
-                'get_object',
+                "get_object",
                 Params={
-                    'Bucket': s3_service.bucket_name,
-                    'Key': voice.s3_key,
-                    'ResponseContentDisposition': f'attachment; filename="voice_{voice_id}.mp3"',
-                    'ResponseContentType': 'audio/mpeg'
+                    "Bucket": s3_service.bucket_name,
+                    "Key": voice.s3_key,
+                    "ResponseContentDisposition": f'attachment; filename="voice_{voice_id}.mp3"',
+                    "ResponseContentType": "audio/mpeg",
                 },
-                ExpiresIn=3600  # 1시간 유효
+                ExpiresIn=3600,  # 1시간 유효
             )
             return {"download_url": presigned_url}
         except Exception as e:
             logger.error(f"다운로드 URL 생성 실패: {str(e)}")
-            raise HTTPException(status_code=500, detail="다운로드 URL 생성에 실패했습니다")
+            raise HTTPException(
+                status_code=500, detail="다운로드 URL 생성에 실패했습니다"
+            )
     else:
         raise HTTPException(status_code=404, detail="음성 파일을 찾을 수 없습니다")
-

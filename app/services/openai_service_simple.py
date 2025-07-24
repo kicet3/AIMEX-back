@@ -56,6 +56,23 @@ class OpenAIService:
             )
         logger.info("OpenAI Service initialized (실제 API 모드)")
 
+    async def openai_tool_selection(self, user_prompt: str, system_prompt: str) -> str:
+        """도구 선택 프롬프트를 OpenAI에 보내고 답변을 반환"""
+        try:
+            response = openai_client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=1024,
+                temperature=0.3,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            logger.error(f"OpenAI 도구 선택 API 호출 실패: {e}")
+            raise ValueError(f"OpenAI 도구 선택 API 호출에 실패했습니다: {str(e)}")
+
     async def generate_social_content(
         self, request: ContentGenerationRequest
     ) -> ContentGenerationResponse:

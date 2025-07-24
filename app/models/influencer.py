@@ -60,24 +60,15 @@ class StylePreset(Base, TimestampMixin):
     influencer_style = Column(
         String(255), nullable=False, comment="인플루언서 전체 스타일(힙함, 청순 등)"
     )
-    influencer_personality = Column(
-        Text, nullable=False, comment="인플루언서 성격"
-    )
-    influencer_speech = Column(
-        Text, nullable=False, comment="인플루언서 말투"
-    )
-    mbti_id = Column(
-        Integer, nullable=True, comment="MBTI 성격 고유 식별자"
-    )
-    system_prompt = Column(
-        Text, nullable=False, comment="인플루언서 시스템 프롬프트"
-    )
-    influencer_description = Column(
-        Text, nullable=False, comment="인플루언서 설명"
-    )
+    influencer_personality = Column(Text, nullable=False, comment="인플루언서 성격")
+    influencer_speech = Column(Text, nullable=False, comment="인플루언서 말투")
+    mbti_id = Column(Integer, nullable=True, comment="MBTI 성격 고유 식별자")
+    system_prompt = Column(Text, nullable=False, comment="인플루언서 시스템 프롬프트")
+    influencer_description = Column(Text, nullable=False, comment="인플루언서 설명")
 
     # 관계
     ai_influencers = relationship("AIInfluencer", back_populates="style_preset")
+
 
 class AIInfluencer(Base, TimestampMixin):
     """AI 인플루언서 모델"""
@@ -136,24 +127,16 @@ class AIInfluencer(Base, TimestampMixin):
     chatbot_option = Column(Boolean, nullable=False, comment="챗봇 생성 여부")
 
     # Instagram 계정 연동 정보 (필수 필드만)
-    instagram_id = Column(
-        String(255), comment="연동된 인스타그램 계정 ID"
-    )
+    instagram_id = Column(String(255), comment="연동된 인스타그램 계정 ID")
     instagram_page_id = Column(
         String(255), comment="인스타그램 비즈니스 페이지 ID (웹훅에서 사용)"
     )
-    instagram_username = Column(
-        String(100), comment="인스타그램 사용자명"
-    )
+    instagram_username = Column(String(100), comment="인스타그램 사용자명")
     instagram_account_type = Column(
         String(50), comment="인스타그램 계정 타입 (PERSONAL, BUSINESS, CREATOR)"
     )
-    instagram_access_token = Column(
-        Text, comment="인스타그램 액세스 토큰"
-    )
-    instagram_connected_at = Column(
-        TIMESTAMP, comment="인스타그램 계정 연동 일시"
-    )
+    instagram_access_token = Column(Text, comment="인스타그램 액세스 토큰")
+    instagram_connected_at = Column(TIMESTAMP, comment="인스타그램 계정 연동 일시")
     instagram_is_active = Column(
         Boolean, default=False, comment="인스타그램 연동 활성화 여부"
     )
@@ -172,8 +155,22 @@ class AIInfluencer(Base, TimestampMixin):
     influencer_apis = relationship("InfluencerAPI", back_populates="influencer")
     boards = relationship("Board", back_populates="influencer")
     generated_tones = relationship("GeneratedTone", back_populates="influencer")
-    voice_base = relationship("VoiceBase", back_populates="influencer", uselist=False, foreign_keys="VoiceBase.influencer_id")
-    generated_voices = relationship("GeneratedVoice", back_populates="influencer", foreign_keys="GeneratedVoice.influencer_id")
+    voice_base = relationship(
+        "VoiceBase",
+        back_populates="influencer",
+        uselist=False,
+        foreign_keys="VoiceBase.influencer_id",
+    )
+    generated_voices = relationship(
+        "GeneratedVoice",
+        back_populates="influencer",
+        foreign_keys="GeneratedVoice.influencer_id",
+    )
+    mcp_servers = relationship(
+        "MCPServer",
+        secondary="AI_INFLUENCER_MCP_SERVER",
+        back_populates="ai_influencers",
+    )
 
     influencer_personality = Column(Text, comment="AI 인플루언서 성격")
     influencer_tone = Column(Text, comment="AI 인플루언서 말투/톤")
@@ -189,6 +186,7 @@ class AIInfluencer(Base, TimestampMixin):
             name="pk_ai_influencer",
         ),
     )
+
 
 class GeneratedTone(Base, TimestampMixin):
     """생성된 어투 모델"""
@@ -211,7 +209,9 @@ class GeneratedTone(Base, TimestampMixin):
     example = Column(Text, nullable=False, comment="어투 예시 대화")
     tone_description = Column(String(255), nullable=False, comment="어투 설명")
     hashtags = Column(String(255), nullable=True, comment="어투 관련 해시태그")
-    system_prompt = Column(Text, nullable=False, comment="어투 생성에 사용된 시스템 프롬프트")
+    system_prompt = Column(
+        Text, nullable=False, comment="어투 생성에 사용된 시스템 프롬프트"
+    )
 
     # 관계
     influencer = relationship("AIInfluencer", back_populates="generated_tones")
@@ -235,32 +235,40 @@ class BatchKey(Base):
         comment="인플루언서 고유 식별자",
     )
     batch_key = Column(String(255), nullable=False, comment="배치키 값")
-    
+
     # QA 생성 배치 작업 관리를 위한 새 필드들
-    task_id = Column(String(255), nullable=True, unique=True, index=True, comment="QA 생성 작업 ID")
-    openai_batch_id = Column(String(255), nullable=True, unique=True, index=True, comment="OpenAI 배치 ID")
+    task_id = Column(
+        String(255), nullable=True, unique=True, index=True, comment="QA 생성 작업 ID"
+    )
+    openai_batch_id = Column(
+        String(255), nullable=True, unique=True, index=True, comment="OpenAI 배치 ID"
+    )
     status = Column(String(50), nullable=True, default="pending", comment="배치 상태")
     total_qa_pairs = Column(Integer, default=2000, comment="총 QA 쌍 수")
     generated_qa_pairs = Column(Integer, default=0, comment="생성된 QA 쌍 수")
-    
+
     # 결과 정보
     input_file_id = Column(String(255), nullable=True, comment="입력 파일 ID")
     output_file_id = Column(String(255), nullable=True, comment="출력 파일 ID")
     error_message = Column(Text, nullable=True, comment="오류 메시지")
     vllm_task_id = Column(String(255), nullable=True, comment="VLLM 파인튜닝 작업 ID")
-    
+
     # S3 업로드 정보
     s3_qa_file_url = Column(String(500), nullable=True, comment="S3 QA 파일 URL")
-    s3_processed_file_url = Column(String(500), nullable=True, comment="S3 처리된 파일 URL")
-    
+    s3_processed_file_url = Column(
+        String(500), nullable=True, comment="S3 처리된 파일 URL"
+    )
+
     # 처리 플래그
     is_processed = Column(Boolean, default=False, comment="결과 처리 완료 여부")
     is_uploaded_to_s3 = Column(Boolean, default=False, comment="S3 업로드 완료 여부")
     is_finetuning_started = Column(Boolean, default=False, comment="파인튜닝 시작 여부")
-    
+
     # 타임스탬프
     created_at = Column(DateTime, default=func.now(), comment="생성 시간")
-    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), comment="수정 시간")
+    updated_at = Column(
+        DateTime, default=func.now(), onupdate=func.now(), comment="수정 시간"
+    )
     completed_at = Column(DateTime, nullable=True, comment="완료 시간")
 
     # 관계
@@ -365,6 +373,3 @@ class APICallAggregation(Base):
     influencer_api = relationship(
         "InfluencerAPI", back_populates="api_call_aggregations"
     )
-
-
-
