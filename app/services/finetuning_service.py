@@ -71,6 +71,7 @@ class FineTuningTask:
     error_message: Optional[str] = None
     training_epochs: int = 5
     qa_batch_task_id: Optional[str] = None
+    system_prompt: Optional[str] = None
     created_at: datetime = None
     updated_at: datetime = None
 
@@ -415,13 +416,14 @@ class InfluencerFineTuningService:
             return None
 
     async def prepare_finetuning_data(
-        self, qa_data: List[Dict], influencer_data: AIInfluencer
+        self, qa_data: List[Dict], influencer_data: AIInfluencer, system_prompt: Optional[str] = None
     ) -> tuple[List[Dict], str]:
         """
         파인튜닝용 데이터 준비
         Args:
             qa_data: QA 데이터
             influencer_data: AIInfluencer 객체
+            system_prompt: 시스템 프롬프트 (선택적)
         Returns:
             (파인튜닝용 데이터, 시스템 메시지) 튜플
         """
@@ -433,10 +435,19 @@ class InfluencerFineTuningService:
             )
             style_info = getattr(influencer_data, "influencer_description", "")
 
-            # 시스템 메시지 생성 (vLLM 서버 사용)
-            system_message = await create_system_message(
-                influencer_name, personality, style_info
-            )
+            # 시스템 메시지 사용 우선순위:
+            # 1. 매개변수로 전달된 system_prompt
+            # 2. influencer_data의 system_prompt
+            # 3. vLLM 서버에서 생성
+            if system_prompt:
+                system_message = system_prompt
+            elif hasattr(influencer_data, 'system_prompt') and influencer_data.system_prompt:
+                system_message = influencer_data.system_prompt
+            else:
+                # vLLM 서버에서 시스템 메시지 생성
+                system_message = await create_system_message(
+                    influencer_name, personality, style_info
+                )
 
             # QA 데이터 변환 (vLLM 서버 사용)
             finetuning_data = await convert_qa_data_for_finetuning(
@@ -458,6 +469,7 @@ class InfluencerFineTuningService:
         hf_token: str,
         epochs: int = 5,
         task_id: Optional[str] = None,
+        system_prompt: str = ""
     ) -> Optional[str]:
         """
         파인튜닝 실행 (VLLM 서버에 작업 제출 후 즉시 반환)
@@ -509,6 +521,7 @@ class InfluencerFineTuningService:
                     hf_repo_id=hf_repo_id,
                     hf_token=hf_token,
                     training_epochs=epochs,
+                    system_prompt=system_prompt,
                     style_info="",
                     is_converted=is_already_converted,
                     task_id=task_id,
@@ -625,7 +638,13 @@ class InfluencerFineTuningService:
         logger.info(
             f"파인튜닝 리포지토리 설정: {hf_repo_id} (원본: {influencer_name} → 영문: {english_name})"
         )
-
+        
+        # system_prompt 가져오기
+        if hasattr(influencer_data, 'system_prompt') and influencer_data.system_prompt:
+            system_message = influencer_data.system_prompt
+        else:
+            system_message = ""
+            
         # 작업 생성
         task = FineTuningTask(
             task_id=ft_task_id,
@@ -636,6 +655,7 @@ class InfluencerFineTuningService:
             model_name=safe_name,
             hf_repo_id=hf_repo_id,
             qa_batch_task_id=task_id,
+            system_prompt=system_message
         )
 
         self.tasks[ft_task_id] = task
@@ -672,7 +692,7 @@ class InfluencerFineTuningService:
 
             # 파인튜닝용 데이터 준비
             finetuning_qa_data, system_message = await self.prepare_finetuning_data(
-                qa_data, influencer_data
+                qa_data, influencer_data, task.system_prompt
             )
 
             # 2. 파인튜닝 실행 단계
@@ -686,6 +706,7 @@ class InfluencerFineTuningService:
                 hf_token=hf_token,
                 epochs=task.training_epochs,
                 task_id=task.qa_batch_task_id,
+                system_prompt=task.system_prompt or system_message
             )
 
             if vllm_task_id:
@@ -852,7 +873,7 @@ class InfluencerFineTuningService:
                 s3_qa_url=s3_qa_file_url,
                 influencer_data=influencer_data,  # 모델 인스턴스 직접 전달
                 db=db,
-                task_id=task_id,
+                task_id=task_id
             )
 
             # 파인튜닝 실행

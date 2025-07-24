@@ -495,7 +495,7 @@ async def update_existing_influencer(
     user_id = current_user.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found")
-    return update_influencer(db, user_id, influencer_id, influencer_update)
+    return await update_influencer(db, user_id, influencer_id, influencer_update)
 
 
 @router.delete("/{influencer_id}")

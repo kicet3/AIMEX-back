@@ -233,7 +233,7 @@ def create_influencer(db: Session, user_id: str, influencer_data: AIInfluencerCr
     return influencer
 
 
-def update_influencer(
+async def update_influencer(
     db: Session, user_id: str, influencer_id: str, influencer_update: AIInfluencerUpdate
 ):
     """AI 인플루언서 정보 수정"""
@@ -241,6 +241,42 @@ def update_influencer(
 
     # 업데이트할 필드들
     update_data = influencer_update.dict(exclude_unset=True)
+    
+    # chatbot_option이 활성화되는지 확인
+    if 'chatbot_option' in update_data and update_data['chatbot_option'] == True:
+        # 현재 chatbot_option이 False인 경우에만 LoRA 어댑터를 로드
+        if not influencer.chatbot_option and influencer.influencer_model_repo:
+            logger.info(f"🤖 챗봇 옵션 활성화 감지 - LoRA 어댑터 로드 시작: {influencer.influencer_name}")
+            
+            # vLLM에 LoRA 어댑터 로드
+            from app.services.vllm_client import vllm_load_adapter_if_needed
+            from app.models.user import HFTokenManage
+            
+            # 허깅페이스 토큰 가져오기
+            hf_token = None
+            if influencer.hf_manage_id:
+                hf_manage = db.query(HFTokenManage).filter(
+                    HFTokenManage.hf_manage_id == influencer.hf_manage_id
+                ).first()
+                if hf_manage:
+                    hf_token = hf_manage.hf_token_value
+            
+            # LoRA 어댑터 로드 (비동기 방식)
+            try:
+                adapter_loaded = await vllm_load_adapter_if_needed(
+                    model_id=influencer.influencer_id,
+                    hf_repo_name=influencer.influencer_model_repo,
+                    hf_token=hf_token
+                )
+                
+                if adapter_loaded:
+                    logger.info(f"✅ LoRA 어댑터 로드 성공: {influencer.influencer_name}")
+                else:
+                    logger.warning(f"⚠️ LoRA 어댑터 로드 실패: {influencer.influencer_name}")
+                    
+            except Exception as e:
+                logger.error(f"❌ LoRA 어댑터 로드 중 오류 발생: {e}")
+    
     for field, value in update_data.items():
         setattr(influencer, field, value)
 
