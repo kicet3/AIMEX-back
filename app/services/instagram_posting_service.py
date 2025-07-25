@@ -189,25 +189,19 @@ class InstagramPostingService:
 
                     if response.status_code != 200:
                         logger.error(
-                            f"Image upload failed: {response.status_code} - {response.text}"
+                            "\n==== INSTAGRAM API ERROR (upload_image_to_instagram) ===="
                         )
-
-                        # Instagram API 오류 메시지 파싱
-                        error_message = "이미지 업로드에 실패했습니다"
-                        try:
-                            error_data = response.json()
-                            if "error" in error_data:
-                                error_detail = error_data["error"]
-                                if "error_user_msg" in error_detail:
-                                    error_message = error_detail["error_user_msg"]
-                                elif "message" in error_detail:
-                                    error_message = error_detail["message"]
-                        except:
-                            pass
-
+                        logger.error(
+                            f"Request URL: {self.base_url}/{instagram_id}/media"
+                        )
+                        logger.error(f"Request data: {request_data}")
+                        logger.error(f"Response status: {response.status_code}")
+                        logger.error(f"Response headers: {response.headers}")
+                        logger.error(f"Response body: {response.text}")
+                        logger.error("==== END ====")
                         raise HTTPException(
                             status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"{error_message}: {response.text}",
+                            detail=f"이미지 업로드 실패: {response.text}",
                         )
 
                     try:
@@ -250,6 +244,222 @@ class InstagramPostingService:
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"이미지 업로드 중 오류가 발생했습니다: {str(e)}",
                 )
+
+    async def upload_single_image_to_instagram(
+        self, image_url: str, access_token: str, instagram_id: str
+    ) -> str:
+        """단일 이미지 업로드 (캐러셀용, 캡션 없음)"""
+        logger.info(f"=== 단일 이미지 업로드 시작 (캐러셀용) ===")
+        logger.info(f"입력 image_url: {image_url}")
+
+        max_retries = 3
+        retry_count = 0
+
+        while retry_count < max_retries:
+            try:
+                logger.info(f"=== 시도 {retry_count + 1}/{max_retries} ===")
+                # 이미지 URL을 공개 URL로 변환
+                public_image_url = self._convert_to_public_url(image_url)
+                logger.info(f"Converting image URL: {image_url} -> {public_image_url}")
+
+                # 변환 실패 체크
+                if not public_image_url:
+                    logger.error(f"이미지 URL 변환 실패: {image_url}")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"이미지 URL을 공개 URL로 변환할 수 없습니다. S3 설정을 확인하세요. 원본 URL: {image_url}",
+                    )
+
+                # 로컬 URL인 경우 인스타그램 업로드 불가능
+                if public_image_url.startswith(
+                    "https://localhost"
+                ) or public_image_url.startswith("http://localhost"):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="로컬 이미지 URL은 인스타그램 API에서 접근할 수 없습니다. 공개 URL을 사용하거나 S3 등의 클라우드 스토리지를 사용하세요.",
+                    )
+
+                async with httpx.AsyncClient() as client:
+                    # Instagram API 요청 데이터 (캡션 없음)
+                    request_data = {
+                        "image_url": public_image_url,
+                    }
+
+                    logger.info(f"Instagram API request data: {request_data}")
+                    logger.info(
+                        f"Instagram API endpoint: {self.base_url}/{instagram_id}/media"
+                    )
+
+                    response = await client.post(
+                        f"{self.base_url}/{instagram_id}/media",
+                        headers={
+                            "Authorization": f"Bearer {access_token}",
+                            "Content-Type": "application/json",
+                        },
+                        json=request_data,
+                        timeout=60.0,
+                    )
+                    logger.info(
+                        f"Instagram API response status: {response.status_code}"
+                    )
+                    logger.info(f"Instagram API response text: {response.text}")
+
+                    if response.status_code != 200:
+                        logger.error(
+                            f"Image upload failed: {response.status_code} - {response.text}"
+                        )
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"이미지 업로드에 실패했습니다: {response.text}",
+                        )
+
+                    data = response.json()
+                    media_id = data.get("id")
+
+                    if not media_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Media ID를 받지 못했습니다.",
+                        )
+
+                    logger.info(f"단일 이미지 업로드 성공: {media_id}")
+                    return media_id
+
+            except httpx.ReadTimeout as e:
+                retry_count += 1
+                logger.warning(
+                    f"Instagram API timeout (attempt {retry_count}/{max_retries}): {e}"
+                )
+                if retry_count >= max_retries:
+                    logger.error(f"Instagram API timeout after {max_retries} attempts")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Instagram API 타임아웃: {max_retries}번 시도 후 실패",
+                    )
+                continue
+            except Exception as e:
+                logger.error(f"단일 이미지 업로드 오류: {str(e)}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"단일 이미지 업로드 중 오류가 발생했습니다: {str(e)}",
+                )
+
+    async def upload_carousel_to_instagram(
+        self,
+        image_urls: List[str],
+        access_token: str,
+        instagram_id: str,
+        caption: str = None,
+    ) -> Dict:
+        """다중 이미지를 Instagram 캐러셀로 업로드"""
+        logger.info(f"=== 캐러셀 업로드 시작 ===")
+        logger.info(f"이미지 개수: {len(image_urls)}")
+
+        try:
+            # 1. 각 이미지를 개별적으로 업로드하여 media_id 획득
+            media_ids = []
+            for i, image_url in enumerate(image_urls):
+                logger.info(f"이미지 {i+1}/{len(image_urls)} 업로드 중...")
+
+                # 개별 이미지 업로드 (캡션 없이)
+                media_id = await self.upload_single_image_to_instagram(
+                    image_url, access_token, instagram_id
+                )
+                media_ids.append(media_id)
+
+            # 2. 캐러셀 생성
+            carousel_data = {
+                "media_type": "CAROUSEL",
+                "children": media_ids,
+            }
+
+            # 캡션이 있으면 추가
+            if caption and caption.strip():
+                # Instagram API 캡션 요구사항 확인
+                safe_caption = caption.strip()
+
+                # 1. 캡션 길이 제한 (2200자)
+                if len(safe_caption) > 2200:
+                    safe_caption = safe_caption[:2197] + "..."
+
+                # 2. 특수 문자 처리 (이모지 제거) - 해시태그 #은 유지
+                import re
+
+                safe_caption = re.sub(r"[^\w\s\.,!?\-()가-힣#]", "", safe_caption)
+
+                # 3. 빈 캡션 방지
+                if safe_caption.strip():
+                    carousel_data["caption"] = safe_caption
+                    logger.info(f"Adding caption to carousel: {safe_caption}")
+
+            # 3. 캐러셀 생성 API 호출
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/{instagram_id}/media",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json",
+                    },
+                    json=carousel_data,
+                    timeout=60.0,
+                )
+
+                logger.info(f"캐러셀 생성 API 응답: {response.status_code}")
+                logger.info(f"캐러셀 생성 API 응답: {response.text}")
+
+                if response.status_code != 200:
+                    logger.error(
+                        "\n==== INSTAGRAM API ERROR (upload_carousel_to_instagram) ===="
+                    )
+                    logger.error(f"Request URL: {self.base_url}/{instagram_id}/media")
+                    logger.error(f"Request data: {carousel_data}")
+                    logger.error(f"Response status: {response.status_code}")
+                    logger.error(f"Response headers: {response.headers}")
+                    logger.error(f"Response body: {response.text}")
+                    logger.error("==== END ====")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"캐러셀 생성 실패: {response.text}",
+                    )
+
+                data = response.json()
+                carousel_id = data.get("id")
+
+                if not carousel_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="캐러셀 ID를 받지 못했습니다.",
+                    )
+
+                # 4. 캐러셀 발행
+                publish_result = await self.publish_post_to_instagram(
+                    carousel_id, caption, access_token, instagram_id
+                )
+
+                logger.info(f"캐러셀 업로드 완료: {carousel_id}")
+
+                # publish_result에서 post ID 추출
+                instagram_post_id = publish_result.get("id")
+                if not instagram_post_id:
+                    logger.error("캐러셀 발행 후 post ID를 받지 못했습니다")
+                    return {
+                        "success": False,
+                        "error": "캐러셀 발행 후 post ID를 받지 못했습니다",
+                        "message": "인스타그램 업로드에 실패했습니다.",
+                    }
+
+                return {
+                    "success": True,
+                    "instagram_post_id": instagram_post_id,
+                    "message": "인스타그램에 성공적으로 업로드되었습니다.",
+                }
+
+        except Exception as e:
+            logger.error(f"캐러셀 업로드 오류: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"캐러셀 업로드 중 오류가 발생했습니다: {str(e)}",
+            )
 
     async def publish_post_to_instagram(
         self, media_id: str, caption: str, access_token: str, instagram_id: str
@@ -326,6 +536,15 @@ class InstagramPostingService:
 
                 if response.status_code != 200:
                     logger.error(
+                        "\n==== INSTAGRAM API ERROR (publish_post_to_instagram) ===="
+                    )
+                    logger.error(f"Request URL: {request_url}")
+                    logger.error(f"Request params: {publish_params}")
+                    logger.error(f"Response status: {response.status_code}")
+                    logger.error(f"Response headers: {response.headers}")
+                    logger.error(f"Response body: {response.text}")
+                    logger.error("==== END ====")
+                    logger.error(
                         f"Post publishing failed: {response.status_code} - {response.text}"
                     )
                     raise HTTPException(
@@ -360,7 +579,7 @@ class InstagramPostingService:
     async def post_to_instagram(
         self, instagram_id: str, access_token: str, image_url: str, caption: str
     ) -> Dict:
-        """전체 Instagram 게시글 업로드 프로세스"""
+        """전체 Instagram 게시글 업로드 프로세스 (단일/다중 이미지 자동 판단)"""
         logger.info(f"=== Instagram Post Upload 시작 ===")
         logger.info(f"instagram_id: {instagram_id}")
         logger.info(f"image_url: {image_url}")
@@ -386,62 +605,80 @@ class InstagramPostingService:
             logger.info(f"Caption type: {type(caption)}")
             logger.info(f"Caption length: {len(caption) if caption else 0}")
 
-            # 1. 이미지 업로드 (캡션 포함)
-            logger.info("=== 1단계: 이미지 업로드 시작 ===")
-            media_id = await self.upload_image_to_instagram(
-                image_url, access_token, instagram_id, caption
-            )
-            logger.info(f"이미지 업로드 성공 - media_id: {media_id}")
+            # 이미지 URL들을 리스트로 분리하여 다중 이미지 여부 판단
+            image_urls = image_url.split(",") if image_url else []
 
-            # 2. 게시글 발행 (캡션은 이미 이미지 업로드 시 포함됨)
-            logger.info("=== 2단계: 게시글 발행 시작 ===")
-            logger.info(f"발행할 media_id: {media_id}")
-            result = await self.publish_post_to_instagram(
-                media_id, "", access_token, instagram_id  # 빈 캡션 전달
-            )
-            logger.info(f"게시글 발행 성공 - result: {result}")
-            logger.info(f"Instagram post completed successfully: {result.get('id')}")
-            logger.info(f"Full Instagram API response: {result}")
-
-            # 인스타그램 API 응답에서 post ID 추출 (여러 가능한 필드 확인)
-            logger.info(f"Full Instagram API response: {result}")
-            logger.info(f"Response keys: {list(result.keys())}")
-
-            instagram_post_id = (
-                result.get("id")
-                or result.get("post_id")
-                or result.get("media_id")
-                or result.get("creation_id")
-            )
-            logger.info(f"Extracted instagram_post_id: {instagram_post_id}")
-            logger.info(
-                f"Available fields: id={result.get('id')}, post_id={result.get('post_id')}, media_id={result.get('media_id')}, creation_id={result.get('creation_id')}"
-            )
-
-            # post ID가 없으면 에러 발생
-            if not instagram_post_id:
-                logger.error(f"No post ID found in Instagram API response: {result}")
-                logger.error(f"Response type: {type(result)}")
-                logger.error(
-                    f"Response keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}"
+            if len(image_urls) > 1:
+                # 다중 이미지: 캐러셀로 업로드
+                logger.info(f"캐러셀 업로드 시작: {len(image_urls)}개 이미지")
+                return await self.upload_carousel_to_instagram(
+                    image_urls, access_token, instagram_id, caption
                 )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="인스타그램에서 post ID를 받지 못했습니다. API 응답을 확인해주세요.",
+            else:
+                # 단일 이미지: 기존 방식으로 업로드
+                logger.info("단일 이미지 업로드 시작")
+                single_image_url = image_urls[0] if image_urls else image_url
+
+                # 1. 이미지 업로드 (캡션 포함)
+                logger.info("=== 1단계: 이미지 업로드 시작 ===")
+                media_id = await self.upload_image_to_instagram(
+                    single_image_url, access_token, instagram_id, caption
+                )
+                logger.info(f"이미지 업로드 성공 - media_id: {media_id}")
+
+                # 2. 게시글 발행 (캡션은 이미 이미지 업로드 시 포함됨)
+                logger.info("=== 2단계: 게시글 발행 시작 ===")
+                logger.info(f"발행할 media_id: {media_id}")
+                result = await self.publish_post_to_instagram(
+                    media_id, "", access_token, instagram_id  # 빈 캡션 전달
+                )
+                logger.info(f"게시글 발행 성공 - result: {result}")
+                logger.info(
+                    f"Instagram post completed successfully: {result.get('id')}"
+                )
+                logger.info(f"Full Instagram API response: {result}")
+
+                # 인스타그램 API 응답에서 post ID 추출 (여러 가능한 필드 확인)
+                logger.info(f"Full Instagram API response: {result}")
+                logger.info(f"Response keys: {list(result.keys())}")
+
+                instagram_post_id = (
+                    result.get("id")
+                    or result.get("post_id")
+                    or result.get("media_id")
+                    or result.get("creation_id")
+                )
+                logger.info(f"Extracted instagram_post_id: {instagram_post_id}")
+                logger.info(
+                    f"Available fields: id={result.get('id')}, post_id={result.get('post_id')}, media_id={result.get('media_id')}, creation_id={result.get('creation_id')}"
                 )
 
-            logger.info(f"=== Instagram 업로드 최종 성공 ===")
-            logger.info(f"인스타그램 포스트 ID: {instagram_post_id}")
-            logger.info(f"업로드된 게시글 정보:")
-            logger.info(f"  - 인스타그램 ID: {instagram_id}")
-            logger.info(f"  - 이미지 URL: {image_url}")
-            logger.info(f"  - 캡션 길이: {len(caption)}자")
+                # post ID가 없으면 에러 발생
+                if not instagram_post_id:
+                    logger.error(
+                        f"No post ID found in Instagram API response: {result}"
+                    )
+                    logger.error(f"Response type: {type(result)}")
+                    logger.error(
+                        f"Response keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}"
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="인스타그램에서 post ID를 받지 못했습니다. API 응답을 확인해주세요.",
+                    )
 
-            return {
-                "success": True,
-                "instagram_post_id": instagram_post_id,
-                "message": "인스타그램에 성공적으로 업로드되었습니다.",
-            }
+                logger.info(f"=== Instagram 업로드 최종 성공 ===")
+                logger.info(f"인스타그램 포스트 ID: {instagram_post_id}")
+                logger.info(f"업로드된 게시글 정보:")
+                logger.info(f"  - 인스타그램 ID: {instagram_id}")
+                logger.info(f"  - 이미지 URL: {single_image_url}")
+                logger.info(f"  - 캡션 길이: {len(caption)}자")
+
+                return {
+                    "success": True,
+                    "instagram_post_id": instagram_post_id,
+                    "message": "인스타그램에 성공적으로 업로드되었습니다.",
+                }
 
         except HTTPException as he:
             logger.error(f"❌ Instagram posting HTTPException: {str(he)}")
@@ -450,7 +687,13 @@ class InstagramPostingService:
             logger.error(f"  - 인스타그램 ID: {instagram_id}")
             logger.error(f"  - 이미지 URL: {image_url}")
             logger.error(f"  - 캡션 길이: {len(caption)}자")
-            raise
+            # HTTPException을 다시 발생시키지 않고 실패 정보 반환
+            return {
+                "success": False,
+                "error": str(he),
+                "detail": he.detail,
+                "message": "인스타그램 업로드에 실패했습니다.",
+            }
         except Exception as e:
             logger.error(f"❌ Instagram posting error: {str(e)}")
             logger.error(f"Error type: {type(e)}")
@@ -459,10 +702,12 @@ class InstagramPostingService:
             logger.error(f"  - 인스타그램 ID: {instagram_id}")
             logger.error(f"  - 이미지 URL: {image_url}")
             logger.error(f"  - 캡션 길이: {len(caption)}자")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"인스타그램 업로드 중 오류가 발생했습니다: {str(e)}",
-            )
+            # Exception을 HTTPException으로 변환하지 않고 실패 정보 반환
+            return {
+                "success": False,
+                "error": str(e),
+                "message": "인스타그램 업로드 중 오류가 발생했습니다.",
+            }
 
     async def verify_instagram_permissions(
         self, access_token: str, instagram_id: str

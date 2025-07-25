@@ -53,26 +53,12 @@ class StartupService:
             )
             return 0
 
-        # vLLM 서버 연결 대기 (최대 30초)
-        logger.info("⏳ vLLM 서버 연결 대기 중...")
-        max_retries = 6  # 5초 * 6회 = 30초
-        retry_delay = 5  # 초
-
+        # vLLM 서버 연결 확인 (한 번만 시도)
         from app.services.vllm_client import vllm_health_check
 
-        for i in range(max_retries):
-            if await vllm_health_check():
-                logger.info("✅ vLLM 서버 연결 성공!")
-                break
-            else:
-                if i < max_retries - 1:
-                    logger.warning(
-                        f"⏳ vLLM 서버 연결 실패, {retry_delay}초 후 재시도... ({i+1}/{max_retries})"
-                    )
-                    await asyncio.sleep(retry_delay)
-                else:
-                    logger.error("❌ vLLM 서버 연결 실패 - 파인튜닝 재시작 건너뜀")
-                    return 0
+        if not await vllm_health_check():
+            logger.warning("⚠️ vLLM 서버 연결 실패 - 파인튜닝 재시작 건너뜀")
+            return 0
 
         try:
             logger.info("🔍 시작시 서비스 실행...")
@@ -495,7 +481,7 @@ class StartupService:
         logger.info("🤗 허깅페이스에 업로드된 모든 인플루언서 모델 로드 시작...")
 
         try:
-            # VLLM 서버 상태 확인
+            # VLLM 서버 상태 확인 (한 번만 시도)
             if not await vllm_health_check():
                 logger.warning("⚠️ VLLM 서버가 비활성화되었거나 연결할 수 없습니다.")
                 return 0

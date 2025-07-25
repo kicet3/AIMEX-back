@@ -6,7 +6,6 @@ from fastapi import (
     Query,
     UploadFile,
     File,
-    Request,
     Body,
     Form,
 )
@@ -16,12 +15,7 @@ import uuid
 from sqlalchemy import update, text
 import json
 import logging
-import os
-import shutil
-from pathlib import Path
-from fastapi.responses import JSONResponse
-from datetime import datetime, timedelta, timezone
-import pytz
+from datetime import datetime
 
 from app.database import get_db
 from app.models.board import Board
@@ -31,10 +25,6 @@ from app.schemas.board import (
     BoardUpdate,
     Board as BoardSchema,
     BoardWithInfluencer,
-    AIContentGenerationRequest,
-    AIContentGenerationResponse,
-    SimpleContentRequest,
-    SimpleContentResponse,
 )
 from app.core.security import get_current_user
 from app.services.content_generation_service import (
@@ -43,177 +33,22 @@ from app.services.content_generation_service import (
     FullContentGenerationRequest,
     FullContentGenerationResponse,
 )
+from app.services.image_generation_workflow import (
+    get_image_generation_workflow_service,
+    FullImageGenerationRequest,
+    FullImageGenerationResponse,
+)
 from app.services.scheduler_service import scheduler_service
 from app.models.influencer import AIInfluencer
 from app.services.instagram_posting_service import InstagramPostingService
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 import re
-from datetime import datetime
 from pydantic import BaseModel
 from app.utils.timezone_utils import get_current_kst, convert_to_kst
-from app.core.encryption import decrypt_sensitive_data
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-# S3 전용 이미지 업로드 (로컬 저장 제거)
-
-# ========================
-# 정적 라우트 (동적 라우트보다 위에 배치)
-# ========================
-
-
-@router.get("/test-s3-connection", include_in_schema=False)
-async def test_s3_connection():
-    """S3 연결 상태 테스트 (인증 불필요)"""
-    try:
-        from app.services.s3_image_service import get_s3_image_service
-
-        s3_service = get_s3_image_service()
-
-        # 기본 연결 확인
-        if not s3_service.is_available():
-            return {
-                "status": "error",
-                "message": "S3 서비스에 연결할 수 없습니다. AWS 설정을 확인하세요.",
-                "bucket": s3_service.bucket_name,
-                "region": s3_service.region,
-            }
-
-        # 버킷 존재 확인
-        bucket_exists = s3_service.check_bucket_exists()
-
-        if not bucket_exists:
-            # 버킷 생성 시도
-            bucket_created = s3_service.create_bucket_if_not_exists()
-
-            if bucket_created:
-                return {
-                    "status": "success",
-                    "message": f"S3 버킷 '{s3_service.bucket_name}'을 생성했습니다.",
-                    "bucket": s3_service.bucket_name,
-                    "region": s3_service.region,
-                    "bucket_created": True,
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": f"S3 버킷 '{s3_service.bucket_name}'이 존재하지 않으며 생성할 수 없습니다. AWS 콘솔에서 버킷을 생성하거나 다른 버킷을 사용하세요.",
-                    "bucket": s3_service.bucket_name,
-                    "region": s3_service.region,
-                    "bucket_exists": False,
-                }
-
-        return {
-            "status": "success",
-            "message": "S3 서비스가 정상적으로 연결되었습니다.",
-            "bucket": s3_service.bucket_name,
-            "region": s3_service.region,
-            "bucket_exists": True,
-        }
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": f"S3 연결 테스트 실패: {str(e)}"},
-        )
-
-
-@router.get("/upload-test-get")
-async def upload_test_get():
-    """업로드 테스트용 GET 엔드포인트 (인증 불필요)"""
-    return {"message": "Upload test GET endpoint working"}
-
-
-@router.post("/upload-test")
-async def upload_test_post(data: dict = Body(...)):
-    """업로드 테스트용 POST 엔드포인트 (인증 불필요)"""
-    return {"message": "Upload test POST endpoint working", "received_data": data}
-
-
-@router.get("/test-image-url/{image_path:path}")
-async def test_image_url(image_path: str):
-    """이미지 URL 접근 테스트 (S3 전용)"""
-    try:
-        from app.services.instagram_posting_service import InstagramPostingService
-
-        # S3 URL로 직접 테스트 (uploads 경로 제거)
-        image_url = (
-            image_path
-            if image_path.startswith("http")
-            else f"https://aimex-influencers.s3.ap-northeast-2.amazonaws.com/{image_path}"
-        )
-
-        # InstagramPostingService 인스턴스 생성
-        service = InstagramPostingService()
-
-        # 공개 URL로 변환
-        public_url = service._convert_to_public_url(image_url)
-
-        # 이미지 유효성 검사
-        is_valid = service._validate_image_url(public_url)
-
-        return {
-            "original_url": image_url,
-            "public_url": public_url,
-            "is_valid": is_valid,
-            "backend_url": service.backend_url,
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@router.post("/upload-image-simple")
-async def upload_image_simple(
-    file: UploadFile = File(...),
-    board_id: str = Form(None, description="게시글 ID (선택사항)"),
-):
-    """이미지 파일을 S3에 업로드하고 URL을 반환"""
-    try:
-        # S3 서비스 사용 가능한지 확인
-        from app.services.s3_image_service import get_s3_image_service
-
-        s3_service = get_s3_image_service()
-
-        if not s3_service.is_available():
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="S3 서비스를 사용할 수 없습니다. AWS 설정을 확인하세요.",
-            )
-
-        # S3에 업로드
-        file_content = await file.read()
-
-        # board_id가 제공된 경우 새로운 경로 구조 사용
-        if board_id:
-            s3_url = await s3_service.upload_image(
-                file_content, file.filename or "uploaded_image.png", board_id
-            )
-        else:
-            # 임시 업로드용
-            s3_url = await s3_service.upload_image(
-                file_content,
-                file.filename or "uploaded_image.png",
-                "temp",  # 임시 board_id
-            )
-
-        return {"file_url": s3_url}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"이미지 업로드 실패: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"이미지 업로드에 실패했습니다: {str(e)}"},
-        )
-
-
-# ========================
-# 테스트/개발용 엔드포인트 삭제됨
-# ========================
-
-# ... 실제 서비스용 엔드포인트만 남김 ...
 
 
 @router.get("", response_model=List[BoardSchema])
@@ -306,26 +141,41 @@ async def get_boards(
             # 이미지 URL을 S3 presigned URL로 변환
             image_url = board.image_url
             if image_url:
-                if not image_url.startswith("http"):
-                    # S3 키인 경우 presigned URL 생성
-                    try:
-                        from app.services.s3_image_service import get_s3_image_service
+                # 쉼표로 구분된 다중 이미지 처리
+                image_urls = image_url.split(",") if "," in image_url else [image_url]
+                processed_image_urls = []
 
-                        s3_service = get_s3_image_service()
-                        if s3_service.is_available():
-                            # presigned URL 생성 (1시간 유효)
-                            image_url = s3_service.generate_presigned_url(
-                                image_url, expiration=3600
+                for single_image_url in image_urls:
+                    single_image_url = single_image_url.strip()
+                    if not single_image_url.startswith("http"):
+                        # S3 키인 경우 presigned URL 생성
+                        try:
+                            from app.services.s3_image_service import (
+                                get_s3_image_service,
                             )
-                        else:
-                            # S3 서비스가 사용 불가능한 경우 직접 URL 생성
-                            image_url = f"https://aimex-influencers.s3.ap-northeast-2.amazonaws.com/{image_url}"
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to generate presigned URL for board {board.board_id}: {e}"
-                        )
-                        # 실패 시 직접 URL 생성
-                        image_url = f"https://aimex-influencers.s3.ap-northeast-2.amazonaws.com/{image_url}"
+
+                            s3_service = get_s3_image_service()
+                            if s3_service.is_available():
+                                # presigned URL 생성 (1시간 유효)
+                                processed_url = s3_service.generate_presigned_url(
+                                    single_image_url, expiration=3600
+                                )
+                            else:
+                                # S3 서비스가 사용 불가능한 경우 직접 URL 생성
+                                processed_url = f"https://aimex-influencers.s3.ap-northeast-2.amazonaws.com/{single_image_url}"
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to generate presigned URL for board {board.board_id}: {e}"
+                            )
+                            # 실패 시 직접 URL 생성
+                            processed_url = f"https://aimex-influencers.s3.ap-northeast-2.amazonaws.com/{single_image_url}"
+                    else:
+                        processed_url = single_image_url
+
+                    processed_image_urls.append(processed_url)
+
+                # 처리된 이미지 URL들을 쉼표로 구분하여 저장
+                image_url = ",".join(processed_image_urls)
 
             board_dict = {
                 "board_id": board.board_id,
@@ -747,7 +597,10 @@ async def create_board(
 
                 # 한국 시간대로 설정 (naive datetime을 한국 시간으로 가정)
                 if scheduled_time.tzinfo is None:
-                    scheduled_time = korea_tz.localize(scheduled_time)
+                    # korea_tz 정의가 없으므로 이 부분은 주석 처리 또는 제거
+                    # from app.utils.timezone_utils import korea_tz
+                    # scheduled_time = korea_tz.localize(scheduled_time)
+                    pass  # korea_tz 정의가 없으므로 이 부분은 주석 처리
 
                 # board_id는 uuid 문자열이므로 변환 없이 그대로 사용
                 await scheduler_service.schedule_post(board_id, scheduled_time)
@@ -768,135 +621,8 @@ async def create_board(
 
         logger.info(f"Board created successfully: {board.board_id}")
 
-        # 인스타그램 자동 업로드 시도 (board_status가 3이고 board_platform이 0인 경우)
-        if board.board_status == 3 and board.board_platform == 0:
-            try:
-                from app.services.instagram_posting_service import (
-                    InstagramPostingService,
-                )
-                from app.models.influencer import AIInfluencer
-
-                # 인플루언서 정보 조회
-                influencer = (
-                    db.query(AIInfluencer)
-                    .filter(AIInfluencer.influencer_id == board.influencer_id)
-                    .first()
-                )
-
-                if (
-                    influencer
-                    and influencer.instagram_is_active
-                    and influencer.instagram_access_token
-                    and influencer.instagram_id
-                ):
-                    logger.info(
-                        f"Attempting Instagram auto-upload for board: {board.board_id}"
-                    )
-
-                    # 설명과 해시태그만 포함하여 캡션 생성
-                    caption_parts = []
-                    if board.board_description and str(board.board_description).strip():
-                        caption_parts.append(str(board.board_description).strip())
-                    # 해시태그 처리: DB에는 # 없이 저장, 업로드 시에만 # 붙임 (공백/쉼표 모두 지원)
-                    if board.board_hash_tag and str(board.board_hash_tag).strip():
-                        import re
-
-                        raw_tags = str(board.board_hash_tag)
-                        tags = re.split(r"[ ,]+", raw_tags)
-                        tags = [tag.strip().lstrip("#") for tag in tags if tag.strip()]
-                        hashtags = [f"#{tag}" for tag in tags]
-                        if hashtags:
-                            caption_parts.append(" ".join(hashtags))
-                        # 디버깅 로그 추가
-                        logger.info(f"Board hash_tag: {board.board_hash_tag}")
-                        logger.info(f"Processed tags: {tags}")
-                        logger.info(f"Generated hashtags: {hashtags}")
-                        logger.info(
-                            f"Final hashtag string: {' '.join(hashtags) if hashtags else 'None'}"
-                        )
-                    raw_caption = (
-                        "\n\n".join(caption_parts)
-                        if caption_parts
-                        else "새로운 게시글입니다."
-                    )
-                    # 특수 문자 처리 (이모지 제거) - 한글, 영문, 숫자, 기본 문장부호, 해시태그(#) 허용
-                    import re
-
-                    caption = re.sub(r"[^\w\s\.,!?\-()가-힣#]", "", raw_caption)
-                    # 인스타그램 캡션 길이 제한 (2200자)
-                    if len(caption) > 2200:
-                        caption = caption[:2197] + "..."
-                    else:
-                        caption = caption
-
-                    logger.info(f"=== Board Auto-Upload Debug ===")
-                    logger.info(f"Board description: {board.board_description}")
-                    logger.info(f"Board topic: {board.board_topic}")
-                    logger.info(f"Raw caption: {raw_caption}")
-                    logger.info(f"Processed caption: {caption}")
-                    logger.info(f"Caption length: {len(caption)}")
-
-                    instagram_service = InstagramPostingService()
-                    result = await instagram_service.post_to_instagram(
-                        instagram_id=str(influencer.instagram_id),
-                        access_token=str(influencer.instagram_access_token),
-                        image_url=str(board.image_url),
-                        caption=caption,
-                    )
-
-                    if result.get("success"):
-                        logger.info(
-                            f"Instagram auto-upload successful for board: {board.board_id}"
-                        )
-
-                        # Instagram post ID를 데이터베이스에 저장
-                        instagram_post_id = result.get("instagram_post_id")
-                        if instagram_post_id:
-                            logger.info(
-                                f"Saving Instagram post ID: {instagram_post_id}"
-                            )
-                            board.platform_post_id = instagram_post_id
-                            board.published_at = get_current_kst()
-                            db.commit()
-                            logger.info(
-                                f"Instagram post ID saved successfully: {instagram_post_id}"
-                            )
-                        else:
-                            logger.warning("No Instagram post ID found in result")
-
-                        db.commit()
-                    else:
-                        # 인스타그램 업로드 실패 시 게시글 생성도 실패로 처리
-                        logger.error(
-                            f"Instagram auto-upload failed for board: {board.board_id}"
-                        )
-                        # 게시글 삭제
-                        db.delete(board)
-                        db.commit()
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="인스타그램 업로드에 실패했습니다. 게시글이 생성되지 않았습니다.",
-                        )
-
-                else:
-                    logger.info(
-                        f"Ignoring Instagram auto-upload - influencer not connected: {board.influencer_id}"
-                    )
-
-            except HTTPException:
-                # 이미 HTTPException이 발생한 경우 재발생
-                raise
-            except Exception as e:
-                logger.error(
-                    f"Instagram auto-upload error for board {board.board_id}: {str(e)}"
-                )
-                # 게시글 삭제
-                db.delete(board)
-                db.commit()
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"인스타그램 업로드 중 예상치 못한 오류가 발생했습니다: {str(e)}. 게시글이 생성되지 않았습니다.",
-                )
+        # 인스타그램 자동 업로드 로직 제거 - 게시글 생성과 인스타그램 업로드를 분리
+        # 사용자가 별도로 인스타그램 업로드 버튼을 눌렀을 때만 업로드하도록 변경
 
         return board
 
@@ -914,11 +640,11 @@ async def create_board(
 @router.post("/create-with-image", response_model=BoardSchema)
 async def create_board_with_image(
     board_data: str = Form(..., description="게시글 데이터 (JSON 문자열)"),
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(...),  # 단일 파일에서 다중 파일로 변경
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """게시글과 이미지를 함께 생성 (원자적 처리)"""
+    """게시글과 다중 이미지를 함께 생성 (원자적 처리)"""
     try:
         user_id = current_user.get("sub")
         if not user_id:
@@ -1025,19 +751,43 @@ async def create_board_with_image(
                 detail="S3 서비스를 사용할 수 없습니다.",
             )
 
-        file_content = await file.read()
-        s3_key = await s3_service.upload_image(
-            file_content,
-            file.filename or "uploaded_image.png",
-            board_id,
-            created_date=current_kst_time,
-        )
+        # 다중 이미지 업로드
+        uploaded_s3_keys = []
+        for i, file in enumerate(files):
+            try:
+                file_content = await file.read()
+                s3_key = await s3_service.upload_image(
+                    file_content,
+                    file.filename or f"image_{i+1}.png",
+                    board_id,
+                    user_id,
+                    created_date=current_kst_time,
+                )
+                uploaded_s3_keys.append(s3_key)
+                logger.info(f"이미지 {i+1} 업로드 성공: {s3_key}")
+            except Exception as e:
+                logger.error(f"이미지 {i+1} 업로드 실패: {e}")
+                # 개별 이미지 업로드 실패 시에도 계속 진행
+                continue
 
-        # 3. 게시글에 이미지 URL 업데이트
+        if not uploaded_s3_keys:
+            # 모든 이미지 업로드 실패 시 게시글 삭제
+            db.execute(
+                text("DELETE FROM BOARD WHERE board_id = :board_id"),
+                {"board_id": board_id},
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="모든 이미지 업로드에 실패했습니다.",
+            )
+
+        # 3. 게시글에 이미지 URL 업데이트 (쉼표로 구분)
+        image_url_string = ",".join(uploaded_s3_keys)
         update_sql = text(
             "UPDATE BOARD SET image_url = :image_url WHERE board_id = :board_id"
         )
-        db.execute(update_sql, {"image_url": s3_key, "board_id": board_id})
+        db.execute(update_sql, {"image_url": image_url_string, "board_id": board_id})
         db.commit()
 
         # 4. 생성된 게시글 조회
@@ -1141,29 +891,36 @@ async def create_board_with_image(
 
                         db.commit()
                     else:
-                        # 인스타그램 업로드 실패 시 게시글 삭제
+                        # 인스타그램 업로드 실패 시에도 게시글은 유지
                         logger.error(
                             f"Instagram auto-upload failed for board: {board.board_id}"
                         )
-                        # S3에서 이미지 삭제
+                        logger.error(
+                            f"Instagram error: {result.get('error', 'Unknown error')}"
+                        )
+                        logger.error(
+                            f"Instagram detail: {result.get('detail', 'No detail')}"
+                        )
+
+                        # S3 이미지는 유지 (임시저장에서 나중에 다시 발행할 수 있도록)
+                        logger.info(f"S3 이미지를 유지합니다: {board.board_id}")
+
+                        # 인스타그램 업로드 실패 시 임시저장으로 상태 변경
                         try:
-                            from app.services.s3_image_service import (
-                                get_s3_image_service,
+                            update_status_sql = text(
+                                "UPDATE BOARD SET board_status = 1 WHERE board_id = :board_id"
                             )
+                            db.execute(update_status_sql, {"board_id": board.board_id})
+                            db.commit()
+                            logger.info(
+                                f"게시글 상태를 임시저장으로 변경: {board.board_id}"
+                            )
+                        except Exception as status_error:
+                            logger.error(f"게시글 상태 변경 실패: {status_error}")
 
-                            s3_service = get_s3_image_service()
-                            if s3_service.is_available():
-                                await s3_service.delete_board_images(board_id)
-                                logger.info(f"S3 이미지 삭제 완료: {board_id}")
-                        except Exception as e:
-                            logger.error(f"S3 이미지 삭제 실패: {e}")
-
-                        # 게시글 삭제
-                        db.delete(board)
-                        db.commit()
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="인스타그램 업로드에 실패했습니다. 게시글이 생성되지 않았습니다.",
+                        # 게시글 삭제하지 않고 유지
+                        logger.info(
+                            f"Board creation completed despite Instagram upload failure: {board.board_id}"
                         )
 
                 else:
@@ -1178,24 +935,26 @@ async def create_board_with_image(
                 logger.error(
                     f"Instagram auto-upload error for board {board.board_id}: {str(e)}"
                 )
-                # S3에서 이미지 삭제
+
+                # S3 이미지는 유지 (임시저장에서 나중에 다시 발행할 수 있도록)
+                logger.info(f"S3 이미지를 유지합니다: {board.board_id}")
+
+                # 인스타그램 업로드 실패 시 임시저장으로 상태 변경
                 try:
-                    from app.services.s3_image_service import get_s3_image_service
+                    update_status_sql = text(
+                        "UPDATE BOARD SET board_status = 1 WHERE board_id = :board_id"
+                    )
+                    db.execute(update_status_sql, {"board_id": board.board_id})
+                    db.commit()
+                    logger.info(f"게시글 상태를 임시저장으로 변경: {board.board_id}")
+                except Exception as status_error:
+                    logger.error(f"게시글 상태 변경 실패: {status_error}")
 
-                    s3_service = get_s3_image_service()
-                    if s3_service.is_available():
-                        await s3_service.delete_board_images(board_id)
-                        logger.info(f"S3 이미지 삭제 완료: {board_id}")
-                except Exception as s3_error:
-                    logger.error(f"S3 이미지 삭제 실패: {s3_error}")
-
-                # 게시글 삭제
-                db.delete(board)
-                db.commit()
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"인스타그램 업로드 중 오류가 발생했습니다: {str(e)}. 게시글이 생성되지 않았습니다.",
+                # 인스타그램 업로드 실패 시에도 게시글은 유지
+                logger.info(
+                    f"Board creation completed despite Instagram upload error: {board.board_id}"
                 )
+                # 에러를 던지지 않고 게시글 생성은 성공으로 처리
 
         # 6. 최종 게시글 정보 반환
         return {
@@ -1329,13 +1088,14 @@ async def delete_board(
             status_code=status.HTTP_404_NOT_FOUND, detail="Board not found"
         )
 
-    # 게시글 이미지 S3에서 삭제
+    # 게시글 이미지 S3에서 삭제 (임시저장일 때만)
     try:
-        from app.services.s3_image_service import get_s3_image_service
+        if board.board_status == 1:
+            from app.services.s3_image_service import get_s3_image_service
 
-        s3_service = get_s3_image_service()
-        if s3_service.is_available():
-            await s3_service.delete_board_images(board_id)
+            s3_service = get_s3_image_service()
+            if s3_service.is_available():
+                await s3_service.delete_board_images(board_id)
     except Exception as e:
         logger.error(f"게시글 S3 이미지 삭제 실패: {e}")
 
@@ -1378,31 +1138,62 @@ async def publish_board(
     return {"message": "Board published successfully"}
 
 
-# ===================================================================
-# 새로운 AI 콘텐츠 생성 엔드포인트들
-# ===================================================================
+# AI 관련 요청/응답 모델 정의
+class AIContentGenerationRequest(BaseModel):
+    board_topic: str
+    board_platform: int
+    influencer_id: str
+    team_id: int  # ← int로 변경
+    include_content: str = None
+    hashtags: str = None
+    image_base64: str = None  # 단일 이미지 데이터
+    image_base64_list: List[str] = None  # 다중 이미지 데이터
 
 
-@router.post("/generate-and-save", response_model=AIContentGenerationResponse)
-async def generate_and_save_board(
+class ContentGenerationResponse(BaseModel):
+    generated_content: str
+    generated_hashtags: List[str]
+
+
+class AIContentGenerationResponse(BaseModel):
+    board_id: str
+    generated_content: str
+    generated_hashtags: List[str]
+    created_at: str
+
+
+@router.post("/generate-content", response_model=ContentGenerationResponse)
+async def generate_content_only(
     request: AIContentGenerationRequest,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),  # 인증 활성화
+    current_user: dict = Depends(get_current_user),
 ):
     """
-    AI 콘텐츠 생성 + 게시글 DB 저장
-
-    완전한 워크플로우:
-    1. 사용자 입력 받기
-    2. OpenAI로 소셜 미디어 콘텐츠 생성
-    3. ComfyUI로 이미지 생성
-    4. 게시글 DB에 저장
-    5. 결과 반환
+    AI 콘텐츠 생성만 수행 (DB 저장 안 함)
     """
     try:
-        logger.info(f"Starting full workflow for topic: {request.board_topic}")
+        logger.info(f"=== AI 콘텐츠 생성 요청 시작 ===")
+        logger.info(f"요청 데이터: {request.dict()}")
+        logger.info(f"board_topic: {request.board_topic}")
+        logger.info(f"board_platform: {request.board_platform}")
+        logger.info(f"include_content: {request.include_content}")
+        logger.info(f"hashtags: {request.hashtags}")
+        # 이미지 리스트 안전하게 처리
+        image_list = request.image_base64_list or []
+        logger.info(f"=== AI 생성 요청 정보 ===")
+        logger.info(f"주제: {request.board_topic}")
+        logger.info(f"플랫폼: {request.board_platform}")
+        logger.info(
+            f"텍스트 내용: {request.include_content[:100] if request.include_content else '없음'}..."
+        )
+        logger.info(f"해시태그: {request.hashtags}")
+        logger.info(f"전체 이미지 개수: {len(image_list)}개")
+        if image_list:
+            for i, img in enumerate(image_list):
+                logger.info(f"이미지 {i+1}: {img[:50]}... (총 {len(img)}자)")
+        else:
+            logger.info("처리할 이미지가 없습니다.")
+        logger.info(f"=== AI 생성 요청 정보 끝 ===")
 
-        # 인증된 사용자 ID 가져오기
         user_id = current_user.get("sub")
         if not user_id:
             raise HTTPException(
@@ -1410,100 +1201,27 @@ async def generate_and_save_board(
                 detail="User authentication required",
             )
 
-        # 사용자가 해당 팀에 속해 있는지 확인 (eager loading 사용)
-        from app.models.user import User
-        from sqlalchemy.orm import selectinload
-
-        user = (
-            db.query(User)
-            .options(selectinload(User.teams))
-            .filter(User.user_id == user_id)
-            .first()
-        )
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-            )
-
-        user_team_ids = [team.group_id for team in user.teams]
-        logger.info(f"User {user_id} belongs to teams: {user_team_ids}")
-
-        if request.team_id not in user_team_ids:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"User is not a member of team {request.team_id}. User teams: {user_team_ids}",
-            )
-
-        # 플랫폼 문자열 매핑
         platform_names = {0: "instagram", 1: "facebook", 2: "twitter", 3: "tiktok"}
         platform_name = platform_names.get(request.board_platform, "instagram")
 
-        # AI 콘텐츠 생성
-        content_response = await generate_content_for_board(
+        content_service = ContentEnhancementService()
+
+        content_result = await content_service.generate_content(
             topic=request.board_topic,
             platform=platform_name,
-            influencer_id=request.influencer_id,
-            user_id=user_id,  # 실제 사용자 ID 사용
-            team_id=request.team_id,
             include_content=request.include_content,
             hashtags=request.hashtags,
-            generate_image=request.generate_image,
+            image_base64_list=image_list,
         )
 
-        # 게시글 DB 저장
-        board_id = str(uuid.uuid4())
+        logger.info(f"AI 콘텐츠 생성 완료")
+        logger.info(f"생성된 설명: {content_result.get('description', '')[:200]}...")
+        logger.info(f"생성된 해시태그: {content_result.get('hashtags', '')}")
 
-        # 생성된 이미지 URL들을 JSON 형태로 저장
-        image_urls = (
-            json.dumps(content_response.generated_images)
-            if content_response.generated_images
-            else "[]"
-        )
-
-        # 해시태그를 문자열로 변환
-        hashtag_str = (
-            " ".join(content_response.hashtags) if content_response.hashtags else ""
-        )
-
-        new_board = Board(
-            board_id=board_id,
-            influencer_id=request.influencer_id,
-            user_id=user_id,  # 실제 사용자 ID 사용
-            team_id=request.team_id,  # 스키마에서는 team_id이지만 DB에서는 group_id로 매핑됨
-            board_topic=request.board_topic,
-            board_description=content_response.social_media_content,
-            board_platform=request.board_platform,
-            board_hash_tag=hashtag_str,
-            board_status=0,  # 최초 생성 상태
-            image_url=image_urls,
-            platform_post_id=None,  # AI 생성 시에는 아직 플랫폼에 업로드되지 않음
-            # reservation_at=request.reservation_at  # 나중에 구현
-        )
-
-        db.add(new_board)
-        db.commit()
-        db.refresh(new_board)
-
-        logger.info(f"Board saved successfully: {board_id}")
-
-        return AIContentGenerationResponse(
-            board_id=board_id,
-            generated_content=content_response.social_media_content,
-            generated_hashtags=content_response.hashtags,
-            generated_images=content_response.generated_images,
-            comfyui_prompt=content_response.comfyui_prompt,
-            generation_id=content_response.generation_id,
-            generation_time=content_response.total_generation_time,
-            created_at=content_response.created_at,
-            openai_metadata=(
-                content_response.openai_response.metadata
-                if content_response.openai_response
-                else {}
-            ),
-            comfyui_metadata=(
-                content_response.comfyui_response.metadata
-                if content_response.comfyui_response
-                else {}
+        return ContentGenerationResponse(
+            generated_content=content_result["description"],
+            generated_hashtags=(
+                content_result["hashtags"].split() if content_result["hashtags"] else []
             ),
         )
 
@@ -1580,6 +1298,121 @@ async def get_comfyui_models(
                 },
             ],
         }
+
+
+# ===================================================================
+# RunPod + ComfyUI 이미지 생성 워크플로우 엔드포인트
+# ===================================================================
+
+
+@router.post("/generate-image-full", response_model=FullImageGenerationResponse)
+async def generate_image_full_workflow(
+    request: FullImageGenerationRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    완전한 이미지 생성 워크플로우
+
+    전체 흐름:
+    1. 사용자 이미지 생성 요청 → DB 저장
+    2. RunPod 서버 실행 요청 (ComfyUI 설치된 이미지)
+    3. ComfyUI API 준비 상태 확인
+    4. OpenAI로 프롬프트 최적화
+    5. ComfyUI 워크플로우에 삽입하여 이미지 생성
+    6. 생성된 이미지 반환
+    7. 작업 완료 후 서버 자동 종료
+    """
+    try:
+        logger.info(
+            f"Starting full image generation workflow for user: {current_user.get('sub')}"
+        )
+
+        # 사용자 ID 설정
+        request.user_id = current_user.get("sub")
+        if not request.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User authentication required",
+            )
+
+        # 워크플로우 서비스 실행
+        workflow_service = get_image_generation_workflow_service()
+        result = await workflow_service.generate_image_full_workflow(request, db)
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Full image generation workflow failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Image generation workflow failed: {str(e)}",
+        )
+
+
+@router.get(
+    "/generate-image-status/{request_id}", response_model=FullImageGenerationResponse
+)
+async def get_image_generation_status(
+    request_id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """이미지 생성 상태 조회"""
+    try:
+        workflow_service = get_image_generation_workflow_service()
+        result = await workflow_service.get_generation_status(request_id, db)
+
+        if result.status == "not_found":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Image generation request not found",
+            )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get image generation status: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get status: {str(e)}",
+        )
+
+
+@router.post("/cancel-image-generation/{request_id}")
+async def cancel_image_generation(
+    request_id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """이미지 생성 취소"""
+    try:
+        workflow_service = get_image_generation_workflow_service()
+        success = await workflow_service.cancel_generation(request_id, db)
+
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot cancel image generation",
+            )
+
+        return {"message": "Image generation cancelled successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to cancel image generation: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to cancel: {str(e)}",
+        )
+
+
+# ===================================================================
+# RunPod 관리 엔드포인트 (수동 정리용)
+# ===================================================================
 
 
 @router.get("/runpod/list-active-pods")
@@ -1919,161 +1752,4 @@ async def get_scheduler_status(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get scheduler status: {str(e)}",
-        )
-
-
-@router.post("/full-enhance", response_model=FullContentGenerationResponse)
-async def full_enhance_content(
-    request: FullContentGenerationRequest = Body(...),
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
-):
-    """
-    새 게시글 생성 시 AI로 본문+해시태그 추천 (해시태그는 입력받지 않음)
-    - 입력: 플랫폼, 주제, 설명, 인플루언서 등 (해시태그 제외)
-    - 출력: 정제된 본문, 추천 해시태그
-    - 플랫폼별 템플릿과 무관, 입력 설명 기반 통합 생성
-    """
-    # 사용자 인증
-    user_id = current_user.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="User authentication required")
-
-    # 요청에 user_id를 강제 주입
-    request.user_id = user_id
-
-    # team_id가 없으면 influencer_id로 조회
-    if not getattr(request, "team_id", None):
-        influencer = (
-            db.query(AIInfluencer)
-            .filter(AIInfluencer.influencer_id == request.influencer_id)
-            .first()
-        )
-        if not influencer:
-            raise HTTPException(
-                status_code=404, detail="해당 인플루언서를 찾을 수 없습니다."
-            )
-        request.team_id = (
-            influencer.team_id
-            if hasattr(influencer, "team_id")
-            else influencer.group_id
-        )
-
-    # 워크플로우 실행
-    workflow = get_content_generation_workflow()
-    result = await workflow.generate_full_content(request)
-    return result
-
-
-class InfluencerStyleRequest(BaseModel):
-    influencer_id: str
-    text: str
-
-
-class InfluencerStyleResponse(BaseModel):
-    converted_text: str
-
-
-@router.post("/influencer-style/convert", response_model=InfluencerStyleResponse)
-async def convert_influencer_style(
-    request: InfluencerStyleRequest,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
-):
-    user_id = current_user.get("sub")
-    # 사용자 정보 및 소속 그룹 확인
-    user = db.query(User).filter(User.user_id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    user_group_ids = [team.group_id for team in user.teams]
-    # 인플루언서 정보 확인
-    ai_influencer = (
-        db.query(AIInfluencer)
-        .filter(AIInfluencer.influencer_id == request.influencer_id)
-        .first()
-    )
-    if not ai_influencer:
-        raise HTTPException(status_code=404, detail="AI 인플루언서를 찾을 수 없습니다.")
-    # 그룹 권한 체크 (본인 소유 또는 소속 그룹)
-    if (
-        ai_influencer.group_id not in user_group_ids
-        and ai_influencer.user_id != user_id
-    ):
-        raise HTTPException(
-            status_code=403, detail="해당 인플루언서에 대한 접근 권한이 없습니다."
-        )
-
-    # 프롬프트 생성
-    influencer_name = getattr(ai_influencer, "influencer_name", "이 인플루언서")
-    influencer_desc = getattr(ai_influencer, "influencer_description", None)
-    influencer_personality = getattr(ai_influencer, "influencer_personality", None)
-
-    # 시스템 프롬프트 생성
-    system_prompt = f"너는 {influencer_name}라는 AI 인플루언서야.\n"
-    if influencer_desc and str(influencer_desc).strip() != "":
-        system_prompt += f"설명: {influencer_desc}\n"
-    if influencer_personality and str(influencer_personality).strip() != "":
-        system_prompt += f"성격: {influencer_personality}\n"
-    system_prompt += "한국어로만 대답해.\n"
-
-    # 사용자 프롬프트 생성
-    user_prompt = f"""
-아래 텍스트의 모든 문장과 단어를 빠짐없이, 순서와 의미를 바꾸지 말고 그대로 본문에 포함하되,
-{influencer_name}의 개성(말투, 사설, 스타일 등)이 자연스럽게 드러나도록 다시 써줘.
-정보는 절대 누락, 요약, 왜곡, 순서 변경 없이 모두 포함해야 하며,
-인플루언서 특유의 말투, 감탄, 짧은 코멘트, 사설 등은 자연스럽게 추가해도 된다.
-
-텍스트:
-{request.text}
-"""
-
-    # vLLM 서버 호출
-    try:
-        from app.services.vllm_client import get_vllm_client
-
-        # VLLM 클라이언트 가져오기
-        vllm_client = await get_vllm_client()
-        logger.info(f"VLLM 클라이언트 생성 완료")
-
-        # 인플루언서의 어댑터 정보 확인
-        influencer_model_repo = getattr(ai_influencer, "influencer_model_repo", None)
-        if influencer_model_repo:
-            # 어댑터가 있으면 로드 시도
-            try:
-                await vllm_client.load_adapter(
-                    model_id=request.influencer_id,
-                    hf_repo_name=influencer_model_repo,
-                    hf_token=None,  # 토큰이 필요하면 추가
-                )
-                logger.info(f"어댑터 로드 성공: {request.influencer_id}")
-            except Exception as e:
-                logger.warning(f"어댑터 로드 실패, 기본 모델 사용: {e}")
-
-        # VLLM 서버에서 응답 생성
-        result = await vllm_client.generate_response(
-            user_message=user_prompt,
-            system_message=system_prompt,
-            influencer_name=influencer_name,
-            model_id=request.influencer_id,  # influencer_id를 model_id로 사용
-            max_new_tokens=1024,
-            temperature=0.7,
-        )
-
-        logger.info(f"VLLM 서버 응답 생성 성공")
-        return InfluencerStyleResponse(converted_text=result["response"])
-
-    except Exception as e:
-        logger.error(f"vLLM 서버 연결 실패: {e}")
-        raise HTTPException(
-            status_code=503,
-            detail="vLLM 서버에 연결할 수 없습니다. 서버 상태를 확인해주세요.",
-        )
-    except Exception as e:
-        logger.error(f"스타일 변환 처리 실패: {e}")
-        logger.error(f"스타일 변환 처리 실패 상세: {type(e).__name__}: {str(e)}")
-        import traceback
-
-        logger.error(f"스타일 변환 처리 실패 스택트레이스: {traceback.format_exc()}")
-        raise HTTPException(
-            status_code=500, detail=f"스타일 변환 처리 중 오류가 발생했습니다: {str(e)}"
         )

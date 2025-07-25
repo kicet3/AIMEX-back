@@ -9,8 +9,6 @@ class BoardBase(BaseModel):
     influencer_id: str
     user_id: str
     team_id: int
-    session_id: Optional[str] = None  # Pod 세션 ID
-    pipeline_id: Optional[str] = None  # 프롬프트 처리 파이프라인 ID
     group_id: int
     board_topic: str
     board_description: Optional[str] = None
@@ -23,8 +21,6 @@ class BoardBase(BaseModel):
 class BoardCreate(BaseModel):
     influencer_id: str
     team_id: int
-    session_id: Optional[str] = None  # Pod 세션 ID
-    pipeline_id: Optional[str] = None  # 프롬프트 처리 파이프라인 ID
     board_topic: str
     board_description: Optional[str] = None
     board_platform: int
@@ -74,7 +70,9 @@ class AIContentGenerationRequest(BaseModel):
     include_content: Optional[str] = None
     hashtags: Optional[str] = None
 
-    # 이미지 생성 옵션
+    # 이미지 base64 데이터 리스트 (최대 5개)
+    image_base64_list: Optional[List[str]] = None
+
     generate_image: bool = True
     image_style: str = "realistic"
     image_width: int = 1024

@@ -77,20 +77,12 @@ class Board(Base, TimestampMixin):
     image_url = Column(
         Text, nullable=False, comment="게시글 썸네일 또는 대표 이미지 URL 경로"
     )
-    reservation_at = Column(
-        TIMESTAMP,
-        nullable=True,
-        comment="예약 발행 시간"
-    )
-    published_at = Column(
-        TIMESTAMP,
-        nullable=True,
-        comment="실제 발행 시간"
-    )
+    reservation_at = Column(TIMESTAMP, nullable=True, comment="예약 발행 시간")
+    published_at = Column(TIMESTAMP, nullable=True, comment="실제 발행 시간")
     platform_post_id = Column(
         String(255),
         nullable=True,
-        comment="각 플랫폼에 업로드된 게시글의 post ID (인스타그램, 페이스북, 블로그 등)"
+        comment="각 플랫폼에 업로드된 게시글의 post ID (인스타그램, 페이스북, 블로그 등)",
     )
     # created_at과 updated_at은 TimestampMixin에서 제공됨
 
@@ -106,4 +98,3 @@ class Board(Base, TimestampMixin):
 
     # 관계
     influencer = relationship("AIInfluencer", back_populates="boards")
-

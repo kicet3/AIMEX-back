@@ -18,10 +18,8 @@ from app.models.influencer import AIInfluencer
 from app.models.user import HFTokenManage
 from app.core.encryption import decrypt_sensitive_data
 from app.core.security import get_current_user
+from app.services.vllm_client import get_vllm_client, vllm_load_adapter_if_needed
 import logging
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import PeftModel
-import torch
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -222,53 +220,89 @@ async def transform_with_influencer_tone(
             raise HTTPException(status_code=400, detail="토큰 값이 없습니다.")
         decrypted_token = decrypt_sensitive_data(encrypted_token_value)
 
+        # 인플루언서 성격과 톤 정보 가져오기
+        personality = getattr(ai_influencer, "influencer_personality", None)
+        tone = getattr(ai_influencer, "influencer_tone", None)
+        description = getattr(ai_influencer, "influencer_description", None)
+
         # OpenAI 방식처럼 프롬프트 명확화
         system_prompt = f"""
 너는 {ai_influencer.influencer_name}라는 AI 인플루언서야.
-설명: {ai_influencer.influencer_description or "친근하고 활발한 인플루언서"}
-성격: {getattr(ai_influencer, 'influencer_personality', '친근하고 활발한')}
+"""
 
+        if description and str(description).strip():
+            system_prompt += f"설명: {description}\n"
+
+        if personality and str(personality).strip():
+            system_prompt += f"성격: {personality}\n"
+
+        if tone and str(tone).strip():
+            system_prompt += f"말투: {tone}\n"
+
+        system_prompt += f"""
 다음 게시글 설명을 {ai_influencer.influencer_name}의 말투와 스타일로 자연스럽게 변환해줘.
-- 본문은 자연스러운 문장으로 작성
-- 마지막에 해시태그 5~10개만 #으로 시작해서 한 줄로 추가 (## 금지)
-- 답변 형식이 아니라, 변환된 설명(본문)과 해시태그만 반환할 것
+- 본문만 자연스러운 문장으로 작성
+- 해시태그는 생성하지 말고 설명 내용만 변환할 것
+- 답변 형식이 아니라, 변환된 설명(본문)만 반환할 것
 
 [게시글 설명]
 {request.content}
 """
 
         try:
-            transformed_content = await generate_response_with_huggingface_model(
-                str(ai_influencer.influencer_model_repo),
-                system_prompt,
-                request.content,
-                str(ai_influencer.influencer_name),
-                decrypted_token,
+            # vLLM 클라이언트 가져오기
+            vllm_client = await get_vllm_client()
+
+            # 어댑터 레포지토리 경로 정리
+            adapter_repo = str(ai_influencer.influencer_model_repo)
+
+            # URL 형태의 레포지토리를 Hugging Face 레포지토리 형식으로 변환
+            from app.utils.hf_utils import extract_hf_repo_path
+
+            adapter_repo = extract_hf_repo_path(adapter_repo)
+
+            # 모델 ID 생성 (인플루언서 ID 사용)
+            model_id = str(ai_influencer.influencer_id)
+
+            # 어댑터 로드 (필요시)
+            logger.info(f"Loading adapter if needed: {model_id} from {adapter_repo}")
+            loaded = await vllm_load_adapter_if_needed(
+                model_id=model_id, hf_repo_name=adapter_repo, hf_token=decrypted_token
             )
 
-            # 본문과 해시태그 분리 (OpenAI 방식과 동일)
-            import re
+            if not loaded:
+                logger.error(f"어댑터 로드 실패: {model_id}")
+                return InfluencerToneResponse(
+                    original_content=request.content,
+                    transformed_content=request.content,
+                    influencer_name=str(ai_influencer.influencer_name),
+                    model_repo=str(ai_influencer.influencer_model_repo),
+                    success=False,
+                    error_message="어댑터를 로드할 수 없습니다.",
+                    hashtags=[],
+                )
 
-            # 해시태그 한 줄 추출 (마지막 줄)
-            lines = transformed_content.strip().split("\n")
-            hashtags_line = ""
-            for i in range(len(lines) - 1, -1, -1):
-                if re.search(r"#\w+", lines[i]):
-                    hashtags_line = lines[i]
-                    lines = lines[:i]
-                    break
-            main_text = "\n".join(lines).strip()
-            # 해시태그 리스트 추출
-            hashtags = re.findall(r"#\w+", hashtags_line)
-            # 후처리: ## → #, # 없으면 # 추가
-            hashtags = [
-                ("#" + tag[2:]) if tag.startswith("##") else ("#" + tag.lstrip("#"))
-                for tag in hashtags
-            ]
+            # vLLM 서버로 응답 생성 요청
+            logger.info(f"Generating response for {model_id} using VLLM")
+            result = await vllm_client.generate_response(
+                user_message=request.content,
+                system_message=system_prompt,
+                influencer_name=str(ai_influencer.influencer_name),
+                model_id=model_id,
+                max_new_tokens=700,
+                temperature=0.7,
+            )
+
+            # 응답 추출 (vLLM은 설명만 변환)
+            transformed_content = result.get("response", "응답을 생성할 수 없습니다.")
+            logger.info(f"✅ Generated response for {model_id}")
+
+            # vLLM은 설명만 변환하므로 해시태그는 빈 리스트로 설정
+            hashtags = []
 
             return InfluencerToneResponse(
                 original_content=request.content,
-                transformed_content=main_text,
+                transformed_content=transformed_content,
                 influencer_name=str(ai_influencer.influencer_name),
                 model_repo=str(ai_influencer.influencer_model_repo),
                 success=True,
@@ -276,7 +310,7 @@ async def transform_with_influencer_tone(
                 hashtags=hashtags,
             )
         except Exception as e:
-            logger.error(f"허깅페이스 모델 변환 실패: {str(e)}")
+            logger.error(f"vLLM 모델 변환 실패: {str(e)}")
             return InfluencerToneResponse(
                 original_content=request.content,
                 transformed_content=request.content,  # 실패 시 원본 반환
@@ -293,123 +327,6 @@ async def transform_with_influencer_tone(
         raise HTTPException(
             status_code=500, detail=f"인플루언서 말투 변환에 실패했습니다: {str(e)}"
         )
-
-
-async def generate_response_with_huggingface_model(
-    model_repo: str,
-    system_message: str,
-    user_message: str,
-    influencer_name: str,
-    hf_token: str = None,
-) -> str:
-    """허깅페이스 모델을 사용한 응답 생성"""
-    try:
-        logger.info(f"허깅페이스 모델 변환 시작: {model_repo}")
-
-        # 1. 베이스 모델 로드
-        base_model_name = "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct"
-        logger.info(f"베이스 모델 로딩: {base_model_name}")
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"사용 디바이스: {device}")
-
-        if device == "cuda":
-            torch.cuda.empty_cache()
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            base_model_name, trust_remote_code=True, token=hf_token
-        )
-
-        base_model = AutoModelForCausalLM.from_pretrained(
-            base_model_name,
-            trust_remote_code=True,
-            token=hf_token,
-            device_map="auto" if device == "cuda" else None,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        )
-
-        # 2. LoRA 어댑터 로드
-        logger.info(f"LoRA 어댑터 로딩: {model_repo}")
-        model = PeftModel.from_pretrained(base_model, model_repo, token=hf_token)
-
-        # 패딩 토큰 설정
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        # 3. 메시지 구성 및 프롬프트 생성
-        messages = [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message},
-        ]
-
-        try:
-            if (
-                hasattr(tokenizer, "apply_chat_template")
-                and tokenizer.chat_template is not None
-            ):
-                prompt = tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
-                )
-            else:
-                prompt = (
-                    f"{system_message}\n\n사용자: {user_message}\n\n{influencer_name}:"
-                )
-        except Exception as e:
-            logger.warning(f"Chat template 적용 실패, 기본 형식 사용: {e}")
-            prompt = f"{system_message}\n\n사용자: {user_message}\n\n{influencer_name}:"
-
-        # 4. 토큰화 및 생성
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
-
-        if device == "cuda":
-            inputs = {k: v.to(model.device) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=200,
-                temperature=0.7,
-                do_sample=True,
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-
-        # 5. 응답 디코딩 및 후처리
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-        if (
-            hasattr(tokenizer, "apply_chat_template")
-            and tokenizer.chat_template is not None
-        ):
-            input_length = len(
-                tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=True)
-            )
-            if len(generated_text) > input_length:
-                response = generated_text[input_length:].strip()
-            else:
-                response = generated_text.strip()
-        else:
-            response = generated_text.split(f"{influencer_name}:")[-1].strip()
-
-        # 응답 후처리
-        response = response.strip()
-        response = response.replace("<|im_end|>", "").replace("<|endoftext|>", "")
-        response = response.replace("[/INST]", "").replace("</s>", "")
-
-        # 너무 길면 자르기
-        if len(response) > 500:
-            response = response[:500] + "..."
-
-        # 빈 응답인 경우 기본 응답 제공
-        if not response.strip():
-            response = f"안녕하세요! {influencer_name}입니다! 😊 {user_message}"
-
-        logger.info(f"허깅페이스 모델 변환 완료")
-        return response
-
-    except Exception as e:
-        logger.error(f"허깅페이스 모델 변환 실패: {str(e)}")
-        raise e
 
 
 class FullEnhancementRequest(BaseModel):
