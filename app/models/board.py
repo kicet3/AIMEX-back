@@ -43,18 +43,18 @@ class Board(Base, TimestampMixin):
         nullable=False,
         comment="팀 고유 식별자",
     )
-    session_id = Column(
-        String(36),
-        ForeignKey("pod_sessions.session_id"),
-        nullable=True,
-        comment="Pod 세션 ID",
-    )
-    pipeline_id = Column(
-        String(36),
-        ForeignKey("prompt_processing_pipelines.pipeline_id"),
-        nullable=True,
-        comment="프롬프트 처리 파이프라인 ID",
-    )
+    # session_id = Column(
+    #     String(36),
+    #     ForeignKey("pod_sessions.session_id"),
+    #     nullable=True,
+    #     comment="Pod 세션 ID",
+    # )
+    # pipeline_id = Column(
+    #     String(36),
+    #     ForeignKey("prompt_processing_pipelines.pipeline_id"),
+    #     nullable=True,
+    #     comment="프롬프트 처리 파이프라인 ID",
+    # )
     group_id = Column(
         Integer,
         nullable=False,

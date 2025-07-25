@@ -56,5 +56,6 @@ def get_background_task_manager() -> BackgroundTaskManager:
 async def generate_influencer_qa_background(influencer_id: str, user_id: str = None):
     """인플루언서 QA 생성 백그라운드 작업 시작 함수"""
     logger.info(f"🚀 백그라운드 함수 호출 - influencer_id={influencer_id}")
+    print(f"🚀 백그라운드 함수 호출 (print) - influencer_id={influencer_id}")  # 추가 로그
     manager = get_background_task_manager()
     await manager.start_qa_generation_task(influencer_id, user_id)

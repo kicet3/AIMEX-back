@@ -86,6 +86,10 @@ def create_access_token(
         "exp": expire,
         "iat": datetime.utcnow()
     })
+    
+    # 디버그: SECRET_KEY 확인
+    logger.info(f"🔑 Creating token with SECRET_KEY: {settings.SECRET_KEY[:20]}... (algorithm: {settings.ALGORITHM})")
+    
     encoded_jwt = jwt.encode(
         to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM
     )
@@ -95,21 +99,29 @@ def create_access_token(
 def verify_token(token: str) -> Optional[dict]:
     """토큰 검증"""
     try:
+        # 디버그: SECRET_KEY 확인
+        logger.info(f"🔐 Verifying token with SECRET_KEY: {settings.SECRET_KEY[:20]}... (algorithm: {settings.ALGORITHM})")
+        
         payload = jwt.decode(
             token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
         )
-        
-        # 보안 로깅: 사용자 ID만 로깅 (DEBUG 로그 제거 - 너무 빈번함)
-        # user_id = payload.get('sub', 'unknown')
-        # logger.debug(f"✅ JWT 토큰 검증 성공: user_id={user_id}")
         return payload
     except JWTError as e:
-        # 보안 로깅: 토큰 마스킹 처리
-        masked_token = mask_token_for_logging(token)
-        logger.error(f"❌ JWT 검증 실패: {str(e)}")
-        logger.error(f"토큰 정보: {masked_token}")
-        logger.error(f"SECRET_KEY 설정 상태: {'Yes' if settings.SECRET_KEY else 'No'}")
-        logger.error(f"알고리즘: {settings.ALGORITHM}")
+        logger.error(f"❌ JWT verification failed: {str(e)}")
+        logger.error(f"Token prefix: {token[:20]}..." if len(token) > 20 else f"Token: {token}")
+        logger.error(f"SECRET_KEY configured: {'Yes' if settings.SECRET_KEY else 'No'}")
+        logger.error(f"SECRET_KEY value: {settings.SECRET_KEY[:20]}...")
+        logger.error(f"Algorithm: {settings.ALGORITHM}")
+        
+        # 토큰 디코딩 시도 (서명 검증 없이)
+        try:
+            unverified = jwt.decode(token, options={"verify_signature": False})
+            logger.error(f"Token payload (unverified): {unverified}")
+            logger.error(f"Token issued at: {datetime.fromtimestamp(unverified.get('iat', 0))}")
+            logger.error(f"Token expires at: {datetime.fromtimestamp(unverified.get('exp', 0))}")
+        except:
+            logger.error("Failed to decode token without verification")
+        
         return None
 
 

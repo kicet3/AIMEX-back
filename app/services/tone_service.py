@@ -77,7 +77,7 @@ class ToneGenerationService:
             
             # vLLM 응답을 기존 형식으로 변환
             conversation_examples = ToneGenerationService._convert_vllm_response_to_conversation_examples(vllm_result)
-            print(conversation_examples)
+            print('conversation_examples', conversation_examples)
             # 응답 구성
             result = {
                 "personality": request.personality,
@@ -124,7 +124,7 @@ class ToneGenerationService:
                 print('tone_name',tone_name,'tone_responses', tone_responses)
                 if tone_responses and len(tone_responses) > 0:
                     tone_response = tone_responses[0]  # 첫 번째 응답 사용
-                    
+                    print('tone_response', tone_response)
                     tone_description = tone_response.get("description", tone_name)
                     hashtags = tone_response.get("hashtags", f"#{tone_name} #말투")
                     system_prompt = tone_response.get("system_prompt", f"당신은 {tone_name} 말투로 대화하는 AI입니다.")

@@ -54,7 +54,7 @@ class UserSessionService:
         self.runpod_service = get_runpod_service()
         logger.info("UserSessionService initialized")
     
-    def create_session(self, user_id: str, db: Session, background_tasks) -> bool:
+    async def create_session(self, user_id: str, db: AsyncSession, background_tasks=None) -> bool:
         """
         사용자 페이지 진입시 세션 생성
         
@@ -76,7 +76,7 @@ class UserSessionService:
             
             # 동시 요청 방지를 위해 사용자 레코드에 lock 설정
             logger.info(f"사용자 {user_id}의 데이터베이스 쿼리 실행")
-            result = db.execute(
+            result = await db.execute(
                 select(User).where(User.user_id == user_id).with_for_update()
             )
             user = result.scalar_one_or_none()
@@ -91,16 +91,25 @@ class UserSessionService:
             # 활성 세션 재확인 (lock된 상태에서)
             if self._has_active_session(user):
                 logger.info(f"사용자 {user_id}가 이미 활성 세션을 보유함")
-                self._update_session_activity(user, db)
+                await self._update_session_activity(user, db)
                 return True
 
             if user.current_pod_id:
                 logger.info(f"사용자 {user_id}의 기존 세션 종료")
-                self._terminate_current_session(user, db, background_tasks)
+                await self._terminate_current_session(user, db, background_tasks)
 
             # 백그라운드에서 실제 Pod 생성 및 상태 업데이트
-            logger.info(f"사용자 {user_id}의 Pod 생성 백그라운드 작업 추가")
-            background_tasks.add_task(self._create_pod_and_update_db_sync, user_id, db)
+            logger.info(f"📌 사용자 {user_id}의 Pod 생성 백그라운드 작업 추가 시작")
+            
+            # WebSocket 환경에서는 asyncio.create_task 사용
+            if background_tasks is None:
+                logger.info(f"🔄 WebSocket 환경 감지 - asyncio.create_task 사용")
+                task = asyncio.create_task(self._create_pod_and_update_db_async(user_id))
+                logger.info(f"✅ asyncio 태스크 생성 완료: {task}")
+            else:
+                logger.info(f"📋 BackgroundTasks 객체 사용: {background_tasks}")
+                background_tasks.add_task(self._create_pod_and_update_db_async, user_id)
+                logger.info(f"✅ 백그라운드 태스크 추가 완료")
 
             # 먼저 DB에 starting 상태를 기록하여 즉각적인 피드백 제공
             now = datetime.now(timezone.utc)
@@ -110,7 +119,7 @@ class UserSessionService:
             user.current_pod_id = "pending" # 임시 ID
             
             logger.info(f"사용자 {user_id}의 세션 생성 데이터베이스 커밋")
-            db.commit()
+            await db.commit()
             
             logger.info(f"사용자 {user_id}의 세션 생성 작업 시작됨")
             return True
@@ -118,7 +127,7 @@ class UserSessionService:
         except Exception as e:
             logger.error(f"사용자 {user_id}의 세션 생성 시작 실패: {e}", exc_info=True)
             try:
-                db.rollback()
+                await db.rollback()
             except:
                 pass
             return False
@@ -529,13 +538,13 @@ class UserSessionService:
         
         return True
     
-    def _update_session_activity(self, user: User, db: Session):
+    async def _update_session_activity(self, user: User, db: Session):
         """세션 활동 시간 업데이트 (필요시)"""
         # 현재는 별도 활동 시간 필드가 없으므로 스킵
         # 필요하다면 나중에 last_activity_at 필드 추가 가능
         pass
     
-    def _terminate_current_session(self, user: User, db: Session, background_tasks=None):
+    async def _terminate_current_session(self, user: User, db: Session, background_tasks=None):
         """현재 세션 종료 (동기 버전)"""
         try:
             if user.current_pod_id and user.current_pod_id != "pending":
@@ -679,10 +688,11 @@ class UserSessionService:
                 user.current_pod_id = None
                 await db.commit()
 
-    async def _create_pod_and_update_db_fixed(self, user_id: str, sync_db: Session):
-        """백그라운드에서 Pod 생성 및 DB 업데이트 (동기 DB 호환, 건강성 체크 포함)"""
+    async def _create_pod_and_update_db_fixed(self, user_id: str, db: AsyncSession):
+        """백그라운드에서 Pod 생성 및 DB 업데이트 (비동기 DB 호환, 건강성 체크 포함)"""
         try:
-            logger.info(f"Background task: Creating RunPod for user {user_id}")
+            logger.info(f"📍 _create_pod_and_update_db_fixed 함수 시작: user {user_id}")
+            logger.info(f"🔄 RunPod 서비스로 Pod 생성 요청 중...")
             pod_response = await self.runpod_service.create_pod(request_id=user_id)
             
             if pod_response and pod_response.pod_id:
@@ -711,30 +721,30 @@ class UserSessionService:
                         logger.error(f"   ❌ Pod 재시작 실패: {restart_result.get('error')}")
                         # 실패해도 원래 Pod으로 계속 진행
                 
-                # 동기 데이터베이스 세션 사용
-                result = sync_db.execute(select(User).where(User.user_id == user_id))
+                # 비동기 데이터베이스 세션 사용
+                result = await db.execute(select(User).where(User.user_id == user_id))
                 user = result.scalar_one_or_none()
                 
                 if user:
                     user.current_pod_id = pod_response.pod_id
                     user.pod_status = pod_response.status.lower() # 'STARTING' -> 'starting'
-                    sync_db.commit()
+                    await db.commit()
                     logger.info(f"DB updated for user {user_id} with pod info: {pod_response.pod_id}")
                     
                     # Pod 준비 상태 확인 시작
-                    await self._wait_for_pod_ready_async(user_id, pod_response.pod_id, sync_db)
+                    await self._wait_for_pod_ready_async(user_id, pod_response.pod_id, db)
             else:
                 raise Exception("Pod creation failed or returned no ID")
 
         except Exception as e:
             logger.error(f"Background task failed for user {user_id}: {e}")
             try:
-                result = sync_db.execute(select(User).where(User.user_id == user_id))
+                result = await db.execute(select(User).where(User.user_id == user_id))
                 user = result.scalar_one_or_none()
                 if user:
                     user.pod_status = "failed"
                     user.current_pod_id = None
-                    sync_db.commit()
+                    await db.commit()
             except Exception as db_error:
                 logger.error(f"Failed to update DB after error: {db_error}")
         finally:
@@ -743,41 +753,41 @@ class UserSessionService:
                 delattr(self, f'_creating_pod_{user_id}')
                 logger.info(f"Pod creation flag cleared for user {user_id}")
 
-    def _create_pod_and_update_db_sync(self, user_id: str, db: Session):
-        """백그라운드에서 Pod 생성 및 DB 업데이트 (동기)"""
+    async def _create_pod_and_update_db_async(self, user_id: str):
+        """백그라운드에서 Pod 생성 및 DB 업데이트 (비동기)"""
+        logger.info(f"🚀 백그라운드 태스크 시작: Pod 생성 for user {user_id}")
         try:
-            import asyncio
-            import threading
-            from app.database import SessionLocal
+            from app.database import get_async_db
             
-            def run_async():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    # 새로운 동기 데이터베이스 세션 생성
-                    sync_db = SessionLocal()
-                    loop.run_until_complete(self._create_pod_and_update_db_fixed(user_id, sync_db))
-                    sync_db.close()
-                finally:
-                    loop.close()
-            
-            # 중복 생성 방지: 이미 실행 중인 스레드가 있는지 확인
+            # 중복 생성 방지: 이미 실행 중인 태스크가 있는지 확인
             if hasattr(self, f'_creating_pod_{user_id}'):
-                logger.info(f"Pod creation already in progress for user {user_id}")
+                logger.warning(f"⚠️ Pod creation already in progress for user {user_id}")
                 return
             
             setattr(self, f'_creating_pod_{user_id}', True)
+            logger.info(f"✅ Pod 생성 플래그 설정 완료: user {user_id}")
             
-            thread = threading.Thread(target=run_async)
-            thread.daemon = True
-            thread.start()
-            logger.info(f"Started background thread for pod creation for user {user_id}")
+            # 새로운 비동기 데이터베이스 세션 생성
+            logger.info(f"📊 데이터베이스 세션 생성 중...")
+            async for db in get_async_db():
+                try:
+                    logger.info(f"🔧 _create_pod_and_update_db_fixed 호출 시작: user {user_id}")
+                    await self._create_pod_and_update_db_fixed(user_id, db)
+                    logger.info(f"✅ _create_pod_and_update_db_fixed 완료: user {user_id}")
+                    break
+                except Exception as e:
+                    logger.error(f"❌ Error in pod creation for user {user_id}: {e}", exc_info=True)
+                    raise
+            
+            logger.info(f"🎉 Pod creation task completed successfully for user {user_id}")
             
         except Exception as e:
-            logger.error(f"Failed to start background pod creation for user {user_id}: {e}")
+            logger.error(f"💥 Failed to create pod for user {user_id}: {e}", exc_info=True)
+        finally:
             # 플래그 해제
             if hasattr(self, f'_creating_pod_{user_id}'):
                 delattr(self, f'_creating_pod_{user_id}')
+                logger.info(f"🧹 Pod 생성 플래그 해제: user {user_id}")
     
     def _wait_for_pod_ready(self, user_id: str, pod_id: str, db: Session):
         """Pod 준비 완료 대기 (임시로 비활성화)"""
@@ -785,7 +795,7 @@ class UserSessionService:
         logger.info(f"Pod ready check disabled temporarily for user {user_id}, pod {pod_id}")
         pass
 
-    async def _wait_for_pod_ready_async(self, user_id: str,pod_id: str, sync_db: Session):
+    async def _wait_for_pod_ready_async(self, user_id: str, pod_id: str, db: AsyncSession):
         """Pod 준비 완료까지 대기 및 상태 업데이트"""
         try:
             logger.info(f"Waiting for pod {pod_id} to be ready for user {user_id}")
@@ -795,18 +805,18 @@ class UserSessionService:
             
             if is_ready:
                 # Pod가 준비되면 상태를 'ready'로 업데이트
-                result = sync_db.execute(select(User).where(User.user_id == user_id))
+                result = await db.execute(select(User).where(User.user_id == user_id))
                 user = result.scalar_one_or_none()
                 
                 if user and user.current_pod_id == pod_id:
                     user.pod_status = "ready"
-                    sync_db.commit()
+                    await db.commit()
                     logger.info(f"✅ Pod {pod_id} is ready for user {user_id}")
                 else:
                     logger.warning(f"User {user_id} not found or pod_id mismatch during ready update")
             else:
                 # Pod 준비 실패
-                result = sync_db.execute(select(User).where(User.user_id == user_id))
+                result = await db.execute(select(User).where(User.user_id == user_id))
                 user = result.scalar_one_or_none()
                 
                 if user and user.current_pod_id == pod_id:
@@ -814,20 +824,20 @@ class UserSessionService:
                     # 실제 ComfyUI가 나중에 응답할 수 있기 때문
                     user.pod_status = "failed"
                     # current_pod_id는 유지하여 나중에 재확인 가능하도록 함
-                    sync_db.commit()
+                    await db.commit()
                     logger.error(f"❌ Pod {pod_id} failed to be ready for user {user_id}")
                     logger.info(f"🔄 Pod ID는 유지하여 나중에 재확인 가능하도록 설정")
                     
         except Exception as e:
             logger.error(f"Error waiting for pod ready for user {user_id}: {e}")
             try:
-                result = sync_db.execute(select(User).where(User.user_id == user_id))
+                result = await db.execute(select(User).where(User.user_id == user_id))
                 user = result.scalar_one_or_none()
                 
                 if user and user.current_pod_id == pod_id:
                     user.pod_status = "failed"
                     # current_pod_id는 유지하여 나중에 재확인 가능하도록 함
-                    sync_db.commit()
+                    await db.commit()
             except Exception as db_error:
                 logger.error(f"Failed to update failed status: {db_error}")
     

@@ -607,8 +607,8 @@ async def websocket_endpoint(
                 elif message_type == "create_session":
                     # 세션 생성 요청 처리
                     try:
-                        background_tasks = BackgroundTasks()
-                        success = user_session_service.create_session(user_id, db, background_tasks)  # await 제거
+                        # WebSocket에서는 BackgroundTasks를 사용할 수 없으므로 None 전달
+                        success = await user_session_service.create_session(user_id, db, None)  # background_tasks=None
                         
                         if success:
                             # 세션 생성 후 상태 전송

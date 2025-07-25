@@ -57,6 +57,11 @@ async def lifespan(app: FastAPI):
     """애플리케이션 생명주기 관리"""
     # 시작 시 실행
     logger.info("🚀 Starting AIMEX API Server...")
+    
+    # SECRET_KEY 디버그 정보 출력
+    logger.info(f"🔑 JWT SECRET_KEY: {settings.SECRET_KEY[:20]}...")
+    logger.info(f"🔑 JWT ALGORITHM: {settings.ALGORITHM}")
+    logger.info(f"🔑 ACCESS_TOKEN_EXPIRE_MINUTES: {settings.ACCESS_TOKEN_EXPIRE_MINUTES}")
 
     # MCP 서버 자동 실행 (데이터베이스에서 로드)
     try:
@@ -153,8 +158,6 @@ app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
     description="AI Influencer Model Management System API",
-    docs_url="/docs",
-    redoc_url="/redoc",
     lifespan=lifespan,
     # 타임아웃 설정 추가
     timeout=300,  # 5분

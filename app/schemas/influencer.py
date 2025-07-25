@@ -36,6 +36,7 @@ class StylePresetBase(BaseModel):
     influencer_personality: str
     influencer_speech: str
     influencer_description: Optional[str] = None
+    system_prompt: Optional[str] = None
 
 
 class StylePresetCreate(StylePresetBase):

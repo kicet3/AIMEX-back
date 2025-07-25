@@ -479,15 +479,108 @@ async def createnew_influencer(
         logger.info(
             f"⚡ 백그라운드 QA 생성 작업 시작 - influencer_id: {influencer.influencer_id}"
         )
+        print(f"⚡ 백그라운드 QA 생성 작업 시작 (print) - influencer_id: {influencer.influencer_id}")  # 추가 로그
         # 백그라운드에서 QA 생성 작업 시작
         background_tasks.add_task(
             generate_influencer_qa_background, influencer.influencer_id, user_id
         )
+        logger.info(f"✅ 백그라운드 태스크 추가 완료 - influencer_id: {influencer.influencer_id}")
+        print(f"✅ 백그라운드 태스크 추가 완료 (print) - influencer_id: {influencer.influencer_id}")  # 추가 로그
     else:
         logger.info("⏸️ 자동 QA 생성이 비활성화되어 있습니다")
 
     logger.info(f"✅ API: 인플루언서 생성 완료 - ID: {influencer.influencer_id}")
     return influencer
+
+
+@router.post("/with-image", response_model=AIInfluencerSchema)
+async def create_influencer_with_image(
+    influencer_data: str = Form(...),  # JSON 문자열로 받음
+    image: Optional[UploadFile] = File(None),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """이미지와 함께 새 AI 인플루언서 생성"""
+    import json
+    
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID not found")
+
+    try:
+        # JSON 문자열을 파싱
+        influencer_dict = json.loads(influencer_data)
+        influencer_create = AIInfluencerCreate(**influencer_dict)
+        
+        logger.info(
+            f"🚀 API: 이미지와 함께 인플루언서 생성 요청 - user_id: {user_id}, name: {influencer_create.influencer_name}"
+        )
+        
+        # 이미지가 있으면 S3에 업로드
+        if image:
+            from app.services.s3_image_service import get_s3_image_service
+            s3_service = get_s3_image_service()
+            
+            if not s3_service.is_available():
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="S3 서비스를 사용할 수 없습니다. AWS 설정을 확인하세요.",
+                )
+            
+            # 이미지 데이터 읽기
+            image_data = await image.read()
+            
+            # 임시 인플루언서 ID 생성 (실제 생성 전)
+            temp_influencer_id = str(uuid.uuid4())
+            
+            # S3에 업로드
+            s3_key = await s3_service.upload_influencer_image(
+                image_data,
+                image.filename or "influencer_image.png",
+                temp_influencer_id
+            )
+            
+            # S3 키를 image_url에 설정
+            influencer_create.image_url = s3_key
+            logger.info(f"🖼️ 인플루언서 이미지 S3 업로드 성공: {s3_key}")
+        
+        # 인플루언서 생성
+        influencer = create_influencer(db, user_id, influencer_create)
+        
+        # 이미지가 있었다면 실제 인플루언서 ID로 S3 키 업데이트 (선택사항)
+        # 현재는 임시 ID를 사용하므로 필요시 구현
+        
+        # 환경변수로 자동 QA 생성 제어
+        auto_qa_enabled = os.getenv("AUTO_FINETUNING_ENABLED", "true").lower() == "true"
+        logger.info(f"🔧 자동 QA 생성 설정: {auto_qa_enabled}")
+        
+        if auto_qa_enabled:
+            logger.info(
+                f"⚡ 백그라운드 QA 생성 작업 시작 - influencer_id: {influencer.influencer_id}"
+            )
+            # 백그라운드에서 QA 생성 작업 시작
+            background_tasks.add_task(
+                generate_influencer_qa_background, influencer.influencer_id, user_id
+            )
+            logger.info(f"✅ 백그라운드 태스크 추가 완료 - influencer_id: {influencer.influencer_id}")
+        else:
+            logger.info("⏸️ 자동 QA 생성이 비활성화되어 있습니다")
+        
+        logger.info(f"✅ API: 인플루언서 생성 완료 - ID: {influencer.influencer_id}")
+        return influencer
+        
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="잘못된 JSON 형식입니다."
+        )
+    except Exception as e:
+        logger.error(f"인플루언서 생성 실패: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"인플루언서 생성에 실패했습니다: {str(e)}"
+        )
 
 
 @router.put("/{influencer_id}", response_model=AIInfluencerSchema)
