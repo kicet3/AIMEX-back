@@ -1,0 +1,37 @@
+# ✅ 문서 처리 및 분할
+pymupdf>=1.23.0
+langchain>=0.1.0
+docling>=1.0.0
+docling-core>=2.19.0,<3.0.0
+docling-ibm-models==3.8.2
+langchain-community>=0.0.30
+
+# ✅ 임베딩 및 벡터 검색 (최종 호환성 확보)
+pymilvus[model]>=2.3.0
+sentence-transformers>=2.7.0,<3.0.0
+
+# ✅ 모델 호출 및 LoRA (최종 호환성 확보)
+transformers>=4.42.0,<4.52.0  # peft + docling 호환
+torch==2.2.2
+torchaudio==2.2.2
+peft==0.16.0
+accelerate>=0.25.0
+bitsandbytes>=0.41.0
+
+# ✅ HuggingFace 생태계 (완전 호환)
+huggingface-hub>=0.23.0,<1.0.0  # docling-ibm-models 요구사항
+sentencepiece>=0.1.99
+safetensors==0.5.3
+sentencepiece>=0.1.99
+safetensors==0.5.3
+
+# ✅ 웹소켓 클라이언트
+websockets==15.0.1
+
+# ✅ 환경변수 관리
+python-dotenv>=1.0.0
+
+# ✅ 기타
+tqdm>=4.66.0
+numpy==1.26.4
+pandas>=1.5.0
