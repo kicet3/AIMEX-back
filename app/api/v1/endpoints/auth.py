@@ -6,7 +6,7 @@ import uuid
 import logging
 
 from app.database import get_db
-from app.models.user import User
+from app.models.user import User, Team
 from app.schemas.user import User as UserSchema, UserWithTeams
 from app.schemas.auth import SocialLoginRequest, TokenResponse, UserInfo
 from app.core.config import settings
@@ -147,7 +147,9 @@ async def get_current_user_info(
     
     from sqlalchemy.orm import selectinload
     
+    logger.info(f"🔍 사용자 조회 시작: user_id={user_id}")
     user = db.query(User).options(selectinload(User.teams)).filter(User.user_id == user_id).first()
+    logger.info(f"✅ 사용자 조회 완료: user_id={user_id}, found={user is not None}")
     
     if user is None:
         raise HTTPException(
@@ -156,8 +158,18 @@ async def get_current_user_info(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # UserWithTeams 스키마에 맞게 teams 필드로 변환
+    # UserWithTeams 스키마에 맞게 teams 필드를 딕셔너리 리스트로 변환
     logger.info(f"DEBUG: User {user.user_id} teams: {[(t.group_id, t.group_name) for t in user.teams]}")
+
+    # teams를 딕셔너리 리스트로 변환
+    teams_list = []
+    for team in user.teams:
+        team_dict = {
+            "group_id": team.group_id,
+            "group_name": team.group_name,
+            "group_description": team.group_description
+        }
+        teams_list.append(team_dict)
     
     user_dict = {
         "user_id": user.user_id,
@@ -167,9 +179,9 @@ async def get_current_user_info(
         "email": user.email,
         "created_at": user.created_at,
         "updated_at": user.updated_at,
-        "teams": user.teams  # teams 필드 사용
+        "teams": teams_list  # 딕셔너리 리스트로 변환된 teams
     }
-    
+
     return user_dict
 
 
@@ -189,3 +201,38 @@ async def get_current_user_enhanced(current_user: dict = Depends(get_current_use
 async def logout(current_user: dict = Depends(get_current_user)):
     """사용자 로그아웃"""
     return {"message": "Logout successful"}
+
+
+@router.get("/teams/by-names")
+async def get_teams_by_names(
+    team_names: str,  # 콤마로 구분된 팀 이름들
+    db: Session = Depends(get_db)
+):
+    """팀 이름으로 실제 팀 정보 조회"""
+    try:
+        # 콤마로 구분된 팀 이름들을 리스트로 변환
+        names_list = [name.strip() for name in team_names.split(',') if name.strip()]
+        
+        # 팀 이름으로 팀 정보 조회
+        teams = db.query(Team).filter(Team.group_name.in_(names_list)).all()
+        
+        # 조회된 팀들을 딕셔너리 리스트로 변환
+        teams_list = []
+        for team in teams:
+            team_dict = {
+                "group_id": team.group_id,
+                "group_name": team.group_name,
+                "group_description": team.group_description
+            }
+            teams_list.append(team_dict)
+        
+        logger.info(f"✅ 팀 정보 조회 완료: 요청된 팀 {len(names_list)}개, 조회된 팀 {len(teams_list)}개")
+        
+        return {"teams": teams_list}
+        
+    except Exception as e:
+        logger.error(f"❌ 팀 정보 조회 실패: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get teams: {str(e)}"
+        )

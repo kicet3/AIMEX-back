@@ -13,6 +13,9 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 from app.models.base import Base, TimestampMixin
 import uuid
+import logging
+
+logger = logging.getLogger(__name__)
 
 # User-Team 다대다 관계 테이블 (실제 DB 구조에 맞춤)
 user_group = Table(
@@ -57,6 +60,11 @@ class User(Base, TimestampMixin):
     system_logs = relationship("SystemLog", back_populates="user")
     ai_influencers = relationship("AIInfluencer", back_populates="user")
     # 이미지 저장소와의 관계는 Team을 통해 관리됨
+    
+    def __repr__(self):
+        """User 객체 로깅용 문자열 표현"""
+        logger.info(f"👤 User 조회됨: user_id={self.user_id}, user_name={self.user_name}, teams_count={len(self.teams) if self.teams else 0}")
+        return f"<User(user_id={self.user_id}, user_name={self.user_name})>"
 
 
 

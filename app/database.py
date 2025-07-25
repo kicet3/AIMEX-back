@@ -1,10 +1,11 @@
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 from app.core.config import settings
 import logging
 from typing import Generator, AsyncGenerator
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -82,12 +83,6 @@ async def get_async_db() -> AsyncGenerator[AsyncSession, None]:
             raise
         finally:
             await session.close()
-
-
-# 동기/비동기 지원
-# API 엔드포인트에서는 get_async_db를 사용하도록 하고
-# 레거시 서비스들은 get_sync_db를 사용하도록 함
-
 
 def init_database():
     """데이터베이스 초기화"""

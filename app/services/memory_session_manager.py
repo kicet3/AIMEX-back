@@ -139,21 +139,12 @@ class MemorySessionManager:
     async def _start_runpod(self, session_id: str) -> Optional[Dict]:
         """RunPod 시작"""
         try:
-            result = await self.runpod_service.create_pod({
-                "name": f"aimex-img-{session_id[:8]}",
-                "template_id": settings.RUNPOD_TEMPLATE_ID,
-                "gpu_type": settings.RUNPOD_GPU_TYPE,
-                "container_disk_in_gb": 50,
-                "env": {
-                    "SESSION_ID": session_id,
-                    "WORKFLOW_TYPE": "flux_nunchaku"
-                }
-            })
+            result = await self.runpod_service.create_pod(session_id)
             
-            if result.get("success"):
+            if result and result.pod_id:
                 return {
-                    "pod_id": result.get("pod_id"),
-                    "endpoint_url": result.get("endpoint_url")
+                    "pod_id": result.pod_id,
+                    "endpoint_url": result.endpoint_url
                 }
             return None
             

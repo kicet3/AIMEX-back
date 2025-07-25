@@ -1,7 +1,7 @@
 # app/application/use_cases/base.py
 """
 애플리케이션 계층 기반 클래스
-SOLID 원칙 적용: 단일 책임 원칙 (SRP) - 각 유스케이스는 하나의 비즈니스 용도만 담당
+
 """
 
 from abc import ABC, abstractmethod

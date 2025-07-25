@@ -1,9 +1,6 @@
 """
 프롬프트 처리 파이프라인 스키마
 
-SOLID 원칙:
-- SRP: 프롬프트 처리 파이프라인 데이터 검증 및 직렬화만 담당
-- OCP: 새로운 처리 단계 추가 시 확장 가능
 """
 
 from pydantic import BaseModel, Field, ConfigDict

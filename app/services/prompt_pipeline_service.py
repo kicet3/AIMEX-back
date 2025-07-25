@@ -1,19 +1,6 @@
 """
 S3 기반 프롬프트 처리 파이프라인 서비스
 
-프롬프트 S3 저장 → OpenAI 최적화 → S3 재저장 플로우를 관리
-
-SOLID 원칙:
-- SRP: 프롬프트 처리 파이프라인만 담당
-- OCP: 새로운 최적화 단계 추가 시 확장 가능
-- LSP: 추상 인터페이스로 다른 AI 서비스로 교체 가능
-- ISP: 클라이언트별 필요한 메서드만 노출
-- DIP: 구체적인 구현이 아닌 추상화에 의존
-
-Clean Architecture:
-- Application Layer: 프롬프트 처리 워크플로우 조정
-- Domain Layer: 프롬프트 최적화 비즈니스 로직
-- Infrastructure Layer: S3, OpenAI API 연동
 """
 
 import uuid

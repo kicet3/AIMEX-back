@@ -1,7 +1,7 @@
 # app/presentation/dependencies/container.py
 """
 의존성 주입 컨테이너
-SOLID 원칙 적용: 의존성 역전 원칙 (DIP) - 고수준 모듈이 저수준 모듈에 의존하지 않음
+
 """
 
 from typing import TypeVar, Dict, Any, Callable, Optional, Type, Protocol

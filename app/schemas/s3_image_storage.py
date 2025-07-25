@@ -1,9 +1,6 @@
 """
 S3 이미지 저장 관리 스키마
 
-SOLID 원칙:
-- SRP: S3 이미지 저장 데이터 검증 및 직렬화만 담당
-- OCP: 새로운 저장소 타입 추가 시 확장 가능
 """
 
 from pydantic import BaseModel, Field, ConfigDict, validator

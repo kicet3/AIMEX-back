@@ -7,7 +7,7 @@ import os
 import boto3
 import json
 import logging
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from datetime import datetime
 from botocore.exceptions import ClientError, NoCredentialsError
 
@@ -102,6 +102,47 @@ class S3Service:
             logger.error(f"파일 업로드 중 예상치 못한 오류: {e}")
             return None
 
+    async def upload_image_data(self, image_data: bytes, key: str, content_type: str = "image/png", return_presigned: bool = True) -> Optional[str]:
+        """
+        이미지 바이트 데이터를 S3에 직접 업로드
+        
+        Args:
+            image_data: 이미지 바이트 데이터
+            key: S3 키 (경로)
+            content_type: 이미지 Content-Type
+            return_presigned: True면 presigned URL 반환, False면 일반 S3 URL 반환
+            
+        Returns:
+            업로드 성공 시 S3 URL 또는 presigned URL, 실패 시 None
+        """
+        if not self.is_available():
+            logger.error("S3 서비스를 사용할 수 없습니다")
+            return None
+            
+        try:
+            # 바이트 데이터를 직접 업로드
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=key,
+                Body=image_data,
+                ContentType=content_type
+            )
+            
+            # Presigned URL 또는 일반 URL 반환
+            if return_presigned:
+                presigned_url = self.generate_presigned_url(key, expiration=86400)  # 24시간
+                logger.info(f"이미지 업로드 성공 (presigned): {key}")
+                return presigned_url
+            else:
+                # S3 URL 생성
+                s3_url = f"https://{self.bucket_name}.s3.{self.aws_region}.amazonaws.com/{key}"
+                logger.info(f"이미지 업로드 성공: {s3_url}")
+                return s3_url
+            
+        except Exception as e:
+            logger.error(f"S3 이미지 업로드 실패: {e}")
+            return None
+    
     def upload_json_data(self, data: Dict or List, s3_key: str) -> Optional[str]:
         """
         JSON 데이터를 직접 S3에 업로드
@@ -243,6 +284,56 @@ class S3Service:
                 files = [obj['Key'] for obj in response['Contents']]
                 
             logger.info(f"파일 목록 조회 성공: {len(files)}개 파일")
+            return files
+            
+        except ClientError as e:
+            logger.error(f"S3 파일 목록 조회 실패: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"파일 목록 조회 중 예상치 못한 오류: {e}")
+            return []
+
+    def list_files_with_presigned_urls(self, prefix: str = "", expiration: int = 86400) -> List[Dict[str, Any]]:
+        """
+        S3 버킷의 파일 목록을 presigned URL과 함께 조회
+        
+        Args:
+            prefix: 파일 경로 접두사
+            expiration: URL 만료 시간 (초, 기본 24시간)
+            
+        Returns:
+            파일 정보 목록 (key, size, last_modified, presigned_url)
+        """
+        if not self.is_available():
+            logger.error("S3 서비스를 사용할 수 없습니다")
+            return []
+            
+        try:
+            response = self.s3_client.list_objects_v2(
+                Bucket=self.bucket_name,
+                Prefix=prefix
+            )
+            
+            files = []
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    # 폴더는 제외 (키가 /로 끝나는 경우)
+                    if obj['Key'].endswith('/'):
+                        continue
+                    
+                    # 이미지 파일만 포함 (확장자 체크)
+                    if any(obj['Key'].lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp', '.gif']):
+                        presigned_url = self.generate_presigned_url(obj['Key'], expiration)
+                        if presigned_url:
+                            files.append({
+                                'key': obj['Key'],
+                                'size': obj['Size'],
+                                'last_modified': obj['LastModified'].isoformat() if hasattr(obj['LastModified'], 'isoformat') else str(obj['LastModified']),
+                                'presigned_url': presigned_url,
+                                'filename': obj['Key'].split('/')[-1]
+                            })
+                
+            logger.info(f"파일 목록 조회 성공: {len(files)}개 이미지 파일")
             return files
             
         except ClientError as e:

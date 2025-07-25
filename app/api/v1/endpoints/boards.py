@@ -43,19 +43,16 @@ from app.services.content_generation_service import (
     FullContentGenerationRequest,
     FullContentGenerationResponse,
 )
-from app.services.image_generation_workflow import (
-    get_image_generation_workflow_service,
-    FullImageGenerationRequest,
-    FullImageGenerationResponse,
-)
 from app.services.scheduler_service import scheduler_service
 from app.models.influencer import AIInfluencer
 from app.services.instagram_posting_service import InstagramPostingService
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 import re
+from datetime import datetime
 from pydantic import BaseModel
 from app.utils.timezone_utils import get_current_kst, convert_to_kst
+from app.core.encryption import decrypt_sensitive_data
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1583,121 +1580,6 @@ async def get_comfyui_models(
                 },
             ],
         }
-
-
-# ===================================================================
-# RunPod + ComfyUI 이미지 생성 워크플로우 엔드포인트
-# ===================================================================
-
-
-@router.post("/generate-image-full", response_model=FullImageGenerationResponse)
-async def generate_image_full_workflow(
-    request: FullImageGenerationRequest,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
-):
-    """
-    완전한 이미지 생성 워크플로우
-
-    전체 흐름:
-    1. 사용자 이미지 생성 요청 → DB 저장
-    2. RunPod 서버 실행 요청 (ComfyUI 설치된 이미지)
-    3. ComfyUI API 준비 상태 확인
-    4. OpenAI로 프롬프트 최적화
-    5. ComfyUI 워크플로우에 삽입하여 이미지 생성
-    6. 생성된 이미지 반환
-    7. 작업 완료 후 서버 자동 종료
-    """
-    try:
-        logger.info(
-            f"Starting full image generation workflow for user: {current_user.get('sub')}"
-        )
-
-        # 사용자 ID 설정
-        request.user_id = current_user.get("sub")
-        if not request.user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User authentication required",
-            )
-
-        # 워크플로우 서비스 실행
-        workflow_service = get_image_generation_workflow_service()
-        result = await workflow_service.generate_image_full_workflow(request, db)
-
-        return result
-
-    except Exception as e:
-        logger.error(f"Full image generation workflow failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Image generation workflow failed: {str(e)}",
-        )
-
-
-@router.get(
-    "/generate-image-status/{request_id}", response_model=FullImageGenerationResponse
-)
-async def get_image_generation_status(
-    request_id: str,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
-):
-    """이미지 생성 상태 조회"""
-    try:
-        workflow_service = get_image_generation_workflow_service()
-        result = await workflow_service.get_generation_status(request_id, db)
-
-        if result.status == "not_found":
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Image generation request not found",
-            )
-
-        return result
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to get image generation status: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get status: {str(e)}",
-        )
-
-
-@router.post("/cancel-image-generation/{request_id}")
-async def cancel_image_generation(
-    request_id: str,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
-):
-    """이미지 생성 취소"""
-    try:
-        workflow_service = get_image_generation_workflow_service()
-        success = await workflow_service.cancel_generation(request_id, db)
-
-        if not success:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot cancel image generation",
-            )
-
-        return {"message": "Image generation cancelled successfully"}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to cancel image generation: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to cancel: {str(e)}",
-        )
-
-
-# ===================================================================
-# RunPod 관리 엔드포인트 (수동 정리용)
-# ===================================================================
 
 
 @router.get("/runpod/list-active-pods")

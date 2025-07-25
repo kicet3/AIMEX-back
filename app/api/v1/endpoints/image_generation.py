@@ -2,32 +2,27 @@
 이미지 생성 API 엔드포인트 - 새로운 플로우 구현
 
 사용자 세션 + ComfyUI + S3 저장을 통합한 이미지 생성 API
+WebSocket을 통한 실시간 세션 상태 모니터링 및 이미지 생성
 
-새로운 플로우:
-1. 프롬프트 입력 → OpenAI 최적화 (프론트에서 처리)
-2. 세션 확인 및 이미지 생성 시작 (10분 타이머)
-3. ComfyUI 워크플로우 실행
-4. 결과 이미지 S3 저장
-5. URL 반환 및 세션 리셋 (10분 연장)
-
-SOLID 원칙 준수:
-- SRP: 이미지 생성 프로세스 조정만 담당
-- OCP: 새로운 생성 방식 확장 가능
-- DIP: 각 서비스 추상화에 의존
 """
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect, status, Query
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import logging
 import asyncio
+import json
+from datetime import datetime
+from app.database import get_async_db
 
-from app.database import get_db, get_async_db
+
 from app.core.security import get_current_user
 from app.services.user_session_service import get_user_session_service
 from app.services.image_storage_service import get_image_storage_service
-from app.services.comfyui_service import get_comfyui_service
+from app.services.comfyui_flux_service import get_comfyui_flux_service
+from app.services.prompt_optimization_service import get_prompt_optimization_service
 from app.services.s3_service import get_s3_service
 from app.models.user import User
 
@@ -38,14 +33,13 @@ router = APIRouter()
 
 # 요청/응답 스키마
 class ImageGenerationRequest(BaseModel):
-    """이미지 생성 요청"""
+    """이미지 생성 요청 - Flux 워크플로우 전용"""
     prompt: str
-    workflow_type: str = "basic_txt2img"
-    negative_prompt: Optional[str] = ""
+    selected_styles: Optional[Dict[str, str]] = {}  # 스타일 선택 정보
     width: int = 1024
     height: int = 1024
-    steps: int = 20
-    cfg_scale: float = 7.0
+    steps: int = 8  # Flux 기본 스텝 수
+    guidance: float = 3.5  # Flux 가이던스 스케일
     seed: Optional[int] = None
 
 
@@ -90,17 +84,23 @@ async def generate_image(
         if not user_id:
             raise HTTPException(status_code=401, detail="사용자 ID를 찾을 수 없습니다.")
         
-        logger.info(f"Starting image generation for user {user_id}, prompt: {request.prompt[:50]}...")
+        logger.info(f"Starting image generation for user {user_id}")
+        logger.info(f"Request data: prompt='{request.prompt[:50]}...', styles={request.selected_styles}, width={request.width}, height={request.height}, steps={request.steps}, guidance={request.guidance}, seed={request.seed}")
         
-        # 1. 사용자 및 그룹 정보 조회
+        # 1. 사용자 및 그룹 정보 조회 (JWT의 user_id를 통해 DB에서 필요한 정보 조회)
         user = await _get_user_with_groups(user_id, db)
-        if not user or not user.teams:
+        logger.info(f"User lookup result for {user_id}: user={user is not None}, teams={len(user.teams) if user and user.teams else 0}")
+        
+        if not user:
+            raise HTTPException(status_code=400, detail="사용자를 찾을 수 없습니다.")
+        
+        if not user.teams:
             raise HTTPException(status_code=400, detail="사용자가 그룹에 속해있지 않습니다.")
         
         # 첫 번째 그룹을 기본 그룹으로 사용
         group_id = user.teams[0].group_id
         
-        # 2. 세션 확인 및 이미지 생성 시작
+        # 2. 세션 확인 및 검증
         user_session_service = get_user_session_service()
         session_started = await user_session_service.start_image_generation(user_id, db)
         
@@ -110,33 +110,81 @@ async def generate_image(
                 detail="이미지 생성을 시작할 수 없습니다. 활성 세션이 없거나 Pod가 준비되지 않았습니다. 페이지를 새로고침해주세요."
             )
         
-        # 3. ComfyUI로 이미지 생성
+        # 3. OpenAI로 프롬프트 최적화
         try:
-            comfyui_service = get_comfyui_service()
+            prompt_service = get_prompt_optimization_service()
             
-            # ComfyUI 파라미터 구성
-            generation_params = {
-                "prompt": request.prompt,
-                "negative_prompt": request.negative_prompt or "",
-                "width": request.width,
-                "height": request.height,
-                "steps": request.steps,
-                "cfg_scale": request.cfg_scale,
-                "seed": request.seed
-            }
-            
-            # 이미지 생성 실행
-            generation_result = await comfyui_service.generate_image_async(
-                workflow_type=request.workflow_type,
-                **generation_params
+            # 한국어 + 스타일 선택 → 영문 ComfyUI 최적화 프롬프트
+            optimized_prompt = await prompt_service.optimize_flux_prompt(
+                user_prompt=request.prompt,
+                selected_styles=request.selected_styles
             )
             
-            if not generation_result or not generation_result.get("success"):
-                raise Exception("ComfyUI 이미지 생성 실패")
+            logger.info(f"🤖 프롬프트 최적화 완료:")
+            logger.info(f"   원본: '{request.prompt}'")
+            logger.info(f"   최적화: '{optimized_prompt}'")
             
-            image_data = generation_result.get("image_data")
+        except Exception as e:
+            logger.error(f"❌ 프롬프트 최적화 실패: {e}")
+            # 최적화 실패 시 원본 프롬프트 사용
+            optimized_prompt = request.prompt
+        
+        # 4. Flux 워크플로우로 이미지 생성
+        try:
+            flux_service = get_comfyui_flux_service()
+            
+            # 사용자 세션에서 ComfyUI 엔드포인트 가져오기
+            session_status = await user_session_service.get_session_status(user_id, db)
+            pod_status = session_status.get("pod_status") if session_status else None
+            
+            # Pod이 ready, running, processing 상태일 때 이미지 생성 허용
+            allowed_statuses = ["ready", "running", "processing"]
+            if not session_status or pod_status not in allowed_statuses:
+                raise Exception(f"ComfyUI 세션이 준비되지 않았습니다 (현재 상태: {pod_status})")
+            
+            # ComfyUI 엔드포인트 구성 (RunPod TCP 포트 사용)
+            pod_id = session_status.get("pod_id")
+            if not pod_id:
+                raise Exception("Pod ID를 찾을 수 없습니다")
+            
+            # RunPod API에서 Pod 정보 조회
+            from app.services.runpod_service import get_runpod_service
+            runpod_service = get_runpod_service()
+            pod_info = await runpod_service.get_pod_status(pod_id)
+            
+            if not pod_info or not hasattr(pod_info, 'runtime') or not pod_info.runtime:
+                raise Exception("ComfyUI 엔드포인트를 찾을 수 없습니다")
+            
+            # endpoint_url이 이미 RunPodPodResponse에 구성되어 있음
+            if not pod_info.endpoint_url:
+                raise Exception("ComfyUI 엔드포인트 URL을 구성할 수 없습니다")
+            
+            comfyui_endpoint = pod_info.endpoint_url
+            logger.info(f"🚀 Flux 워크플로우 실행: {comfyui_endpoint}")
+            
+            # 최적화된 프롬프트로 Flux 워크플로우 실행
+            flux_result = await flux_service.generate_image_with_prompt(
+                prompt=optimized_prompt,  # 최적화된 프롬프트 사용
+                comfyui_endpoint=comfyui_endpoint,
+                width=request.width,
+                height=request.height,
+                guidance=request.guidance,
+                steps=request.steps
+            )
+            
+            if not flux_result:
+                raise Exception("Flux 워크플로우 실행 실패")
+            
+            # 생성된 이미지 다운로드
+            image_data = await flux_service.download_generated_image(
+                comfyui_endpoint=comfyui_endpoint,
+                image_info=flux_result
+            )
+            
             if not image_data:
-                raise Exception("생성된 이미지 데이터가 없습니다")
+                raise Exception("생성된 이미지 다운로드 실패")
+            
+            logger.info(f"✅ Flux 이미지 생성 완료: {len(image_data)} bytes")
         
         except Exception as e:
             logger.error(f"ComfyUI generation failed: {e}")
@@ -148,11 +196,11 @@ async def generate_image(
         try:
             s3_service = get_s3_service()
             
-            # S3 키 생성 (user_id/timestamp_uuid.png)
+            
             import uuid
             from datetime import datetime
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            image_filename = f"{user_id}/{timestamp}_{str(uuid.uuid4())[:8]}.png"
+            image_filename = f"generate_image/team_{group_id}/{user_id}/{timestamp}_{str(uuid.uuid4())[:8]}.png"
             
             # S3 업로드
             s3_url = await s3_service.upload_image_data(
@@ -299,6 +347,87 @@ async def delete_my_image(
         raise HTTPException(status_code=500, detail=f"이미지 삭제 중 오류 발생: {str(e)}")
 
 
+@router.get("/team-images", response_model=ImageListResponse)
+async def get_team_images(
+    group_id: Optional[int] = None,
+    limit: int = 20,
+    offset: int = 0,
+    current_user: Dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db)
+):
+    """
+    팀별 생성된 이미지 목록 조회
+    
+    group_id가 없으면 사용자가 속한 모든 팀의 이미지를 조회
+    group_id가 주어지면 해당 팀의 이미지만 조회
+    """
+    try:
+        user_id = current_user.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="사용자 ID를 찾을 수 없습니다.")
+        
+        # 사용자 및 그룹 정보 조회
+        user = await _get_user_with_groups(user_id, db)
+        if not user:
+            raise HTTPException(status_code=400, detail="사용자를 찾을 수 없습니다.")
+        
+        if not user.teams:
+            raise HTTPException(status_code=400, detail="사용자가 그룹에 속해있지 않습니다.")
+        
+        # 사용자가 속한 팀 ID 목록
+        user_team_ids = [team.group_id for team in user.teams]
+        
+        # group_id가 지정된 경우, 사용자가 해당 팀에 속해있는지 확인
+        if group_id is not None:
+            if group_id not in user_team_ids:
+                raise HTTPException(status_code=403, detail="해당 팀의 이미지를 조회할 권한이 없습니다.")
+            team_ids_to_query = [group_id]
+        else:
+            # group_id가 없으면 사용자가 속한 모든 팀의 이미지 조회
+            team_ids_to_query = user_team_ids
+        
+        # 이미지 저장 서비스로 팀별 이미지 조회
+        image_storage_service = get_image_storage_service()
+        all_images = []
+        
+        for team_id in team_ids_to_query:
+            team_images = await image_storage_service.get_images_by_group(
+                group_id=team_id,
+                db=db,
+                limit=limit,
+                offset=offset
+            )
+            
+            # 각 이미지에 team_id 정보 추가
+            for image in team_images:
+                image['team_id'] = team_id
+                if team_id in [team.group_id for team in user.teams]:
+                    team = next(team for team in user.teams if team.group_id == team_id)
+                    image['team_name'] = team.group_name
+            
+            all_images.extend(team_images)
+        
+        # 생성일 기준 최신순 정렬
+        all_images.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        # limit 적용
+        if group_id is None and len(all_images) > limit:
+            all_images = all_images[:limit]
+        
+        return ImageListResponse(
+            success=True,
+            images=all_images,
+            total_count=len(all_images),
+            message=f"{len(all_images)}개의 팀 이미지를 조회했습니다."
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get team images: {e}")
+        raise HTTPException(status_code=500, detail=f"팀 이미지 목록 조회 중 오류 발생: {str(e)}")
+
+
 @router.get("/health")
 async def image_generation_health_check():
     """
@@ -348,18 +477,566 @@ async def image_generation_health_check():
         )
 
 
+# WebSocket 연결 관리
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}
+    
+    async def connect(self, websocket: WebSocket, user_id: str):
+        await websocket.accept()
+        self.active_connections[user_id] = websocket
+        logger.info(f"WebSocket connected for user: {user_id}")
+    
+    def disconnect(self, user_id: str):
+        if user_id in self.active_connections:
+            del self.active_connections[user_id]
+            logger.info(f"WebSocket disconnected for user: {user_id}")
+    
+    async def send_message(self, user_id: str, message: dict):
+        if user_id in self.active_connections:
+            try:
+                # datetime 객체를 문자열로 변환
+                import json
+                from datetime import datetime
+                
+                def datetime_handler(obj):
+                    if isinstance(obj, datetime):
+                        return obj.isoformat()
+                    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+                
+                # JSON 직렬화 후 다시 파싱하여 datetime 문제 해결
+                json_str = json.dumps(message, default=datetime_handler)
+                await self.active_connections[user_id].send_text(json_str)
+            except Exception as e:
+                logger.error(f"Failed to send message to user {user_id}: {e}")
+    
+    async def broadcast(self, message: dict):
+        for user_id, connection in self.active_connections.items():
+            try:
+                await connection.send_json(message)
+            except Exception as e:
+                logger.error(f"Failed to broadcast to user {user_id}: {e}")
+
+
+manager = ConnectionManager()
+
+
+@router.websocket("/ws")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    token: str = Query(...),
+    db: AsyncSession = Depends(get_async_db)
+):
+    """
+    WebSocket 엔드포인트 - 실시간 세션 상태 모니터링 및 이미지 생성
+    
+    클라이언트 메시지 형식:
+    {
+        "type": "session_status" | "generate_image" | "ping",
+        "data": {...}
+    }
+    
+    서버 메시지 형식:
+    {
+        "type": "session_status" | "generation_progress" | "generation_complete" | "error" | "pong",
+        "data": {...}
+    }
+    """
+    user_id = None
+    
+    try:
+        # JWT 토큰 검증
+        from app.core.security import verify_token
+        payload = verify_token(token)
+        if not payload:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        
+        user_id = payload.get("sub")
+        if not user_id:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        
+        # WebSocket 연결
+        await manager.connect(websocket, user_id)
+        
+        # 초기 세션 상태 전송
+        user_session_service = get_user_session_service()
+        session_status = await user_session_service.get_session_status(user_id, db)
+        
+        await manager.send_message(user_id, {
+            "type": "session_status",
+            "data": session_status or {"pod_status": "none"}
+        })
+        
+        # 주기적인 세션 상태 업데이트를 위한 태스크
+        async def send_session_updates():
+            while True:
+                try:
+                    await asyncio.sleep(5)  # 5초마다 상태 업데이트
+                    
+                    session_status = await user_session_service.get_session_status(user_id, db)
+                    await manager.send_message(user_id, {
+                        "type": "session_status",
+                        "data": session_status or {"pod_status": "none"}
+                    })
+                except Exception as e:
+                    logger.error(f"Error sending session update: {e}")
+                    break
+        
+        # 백그라운드 태스크 시작
+        update_task = asyncio.create_task(send_session_updates())
+        
+        try:
+            while True:
+                # 클라이언트로부터 메시지 수신
+                data = await websocket.receive_json()
+                message_type = data.get("type")
+                
+                if message_type == "ping":
+                    await manager.send_message(user_id, {"type": "pong"})
+                
+                elif message_type == "session_status":
+                    # 즉시 세션 상태 전송
+                    session_status = await user_session_service.get_session_status(user_id, db)
+                    await manager.send_message(user_id, {
+                        "type": "session_status",
+                        "data": session_status or {"pod_status": "none"}
+                    })
+                
+                elif message_type == "create_session":
+                    # 세션 생성 요청 처리
+                    try:
+                        background_tasks = BackgroundTasks()
+                        success = user_session_service.create_session(user_id, db, background_tasks)  # await 제거
+                        
+                        if success:
+                            # 세션 생성 후 상태 전송
+                            session_status = await user_session_service.get_session_status(user_id, db)
+                            await manager.send_message(user_id, {
+                                "type": "session_created",
+                                "data": {
+                                    "success": True,
+                                    "session_status": session_status,
+                                    "message": "세션이 성공적으로 생성되었습니다."
+                                }
+                            })
+                        else:
+                            await manager.send_message(user_id, {
+                                "type": "session_created",
+                                "data": {
+                                    "success": False,
+                                    "message": "세션 생성에 실패했습니다."
+                                }
+                            })
+                    except Exception as e:
+                        logger.error(f"Session creation error: {e}")
+                        await manager.send_message(user_id, {
+                            "type": "session_created",
+                            "data": {
+                                "success": False,
+                                "message": f"세션 생성 중 오류: {str(e)}"
+                            }
+                        })
+                
+                elif message_type == "generate_image":
+                    # 이미지 생성 요청 처리
+                    await handle_websocket_image_generation(
+                        websocket=websocket,
+                        user_id=user_id,
+                        request_data=data.get("data", {}),
+                        db=db
+                    )
+                
+                elif message_type == "get_my_images":
+                    # 사용자 이미지 목록 조회
+                    try:
+                        limit = data.get("data", {}).get("limit", 20)
+                        offset = data.get("data", {}).get("offset", 0)
+                        
+                        image_storage_service = get_image_storage_service()
+                        images = await image_storage_service.get_user_images(
+                            user_id=user_id,
+                            db=db,
+                            limit=limit,
+                            offset=offset
+                        )
+                        
+                        await manager.send_message(user_id, {
+                            "type": "images_list",
+                            "data": {
+                                "success": True,
+                                "images": images,
+                                "total_count": len(images),
+                                "message": f"{len(images)}개의 이미지를 조회했습니다."
+                            }
+                        })
+                    except Exception as e:
+                        logger.error(f"Failed to get images for user {user_id}: {e}")
+                        await manager.send_message(user_id, {
+                            "type": "error",
+                            "data": {
+                                "success": False,
+                                "message": f"이미지 목록 조회 중 오류: {str(e)}"
+                            }
+                        })
+                
+                elif message_type == "get_s3_images":
+                    # S3 폴더에서 직접 이미지 목록 조회
+                    try:
+                        s3_service = get_s3_service()
+                        folder_path = data.get("data", {}).get("folder_path", "")
+                        
+                        # 사용자의 팀 정보 확인
+                        user = await _get_user_with_groups(user_id, db)
+                        if not user or not user.teams:
+                            raise Exception("사용자 정보를 찾을 수 없습니다.")
+                        
+                        # 기본 경로 설정 (보안을 위해 팀 폴더로 제한)
+                        if not folder_path:
+                            # 사용자가 속한 팀들의 이미지 가져오기
+                            all_images = []
+                            for team in user.teams:
+                                team_prefix = f"generate_image/team_{team.group_id}/"
+                                team_images = s3_service.list_files_with_presigned_urls(team_prefix)
+                                
+                                # 각 이미지에 팀 정보 추가
+                                for img in team_images:
+                                    img['team_id'] = team.group_id
+                                    img['team_name'] = team.group_name
+                                
+                                all_images.extend(team_images)
+                            
+                            # 최근 수정일 기준 정렬
+                            all_images.sort(key=lambda x: x['last_modified'], reverse=True)
+                            
+                            await manager.send_message(user_id, {
+                                "type": "s3_images_list",
+                                "data": {
+                                    "success": True,
+                                    "images": all_images[:100],  # 최대 100개로 제한
+                                    "total_count": len(all_images),
+                                    "message": f"{len(all_images)}개의 이미지를 S3에서 조회했습니다."
+                                }
+                            })
+                        else:
+                            # 특정 폴더 경로 조회 (보안 체크)
+                            # 팀 폴더인지 확인
+                            valid_path = False
+                            for team in user.teams:
+                                if folder_path.startswith(f"generate_image/team_{team.group_id}/"):
+                                    valid_path = True
+                                    break
+                            
+                            if not valid_path:
+                                raise Exception("접근 권한이 없는 폴더입니다.")
+                            
+                            images = s3_service.list_files_with_presigned_urls(folder_path)
+                            
+                            await manager.send_message(user_id, {
+                                "type": "s3_images_list",
+                                "data": {
+                                    "success": True,
+                                    "images": images,
+                                    "total_count": len(images),
+                                    "folder_path": folder_path,
+                                    "message": f"{len(images)}개의 이미지를 조회했습니다."
+                                }
+                            })
+                    except Exception as e:
+                        logger.error(f"Failed to get S3 images: {e}")
+                        await manager.send_message(user_id, {
+                            "type": "error",
+                            "data": {
+                                "success": False,
+                                "message": f"S3 이미지 목록 조회 중 오류: {str(e)}"
+                            }
+                        })
+                
+                elif message_type == "get_team_images":
+                    # 팀별 이미지 목록 조회
+                    try:
+                        group_id = data.get("data", {}).get("group_id")
+                        limit = data.get("data", {}).get("limit", 20)
+                        offset = data.get("data", {}).get("offset", 0)
+                        
+                        # 사용자가 속한 팀 확인
+                        user = await _get_user_with_groups(user_id, db)
+                        if not user:
+                            raise Exception("사용자 정보를 찾을 수 없습니다.")
+                        
+                        team_ids_to_query = []
+                        if group_id:
+                            # 특정 그룹 ID가 주어진 경우
+                            if any(team.group_id == group_id for team in user.teams):
+                                team_ids_to_query = [group_id]
+                            else:
+                                raise Exception("해당 팀에 접근 권한이 없습니다.")
+                        else:
+                            # 모든 팀의 이미지 조회
+                            team_ids_to_query = [team.group_id for team in user.teams]
+                        
+                        # 이미지 조회
+                        image_storage_service = get_image_storage_service()
+                        all_images = []
+                        
+                        for team_id in team_ids_to_query:
+                            team_images = await image_storage_service.get_images_by_group(
+                                group_id=team_id,
+                                db=db,
+                                limit=limit,
+                                offset=offset
+                            )
+                            
+                            # 각 이미지에 team_id 정보 추가
+                            for image in team_images:
+                                image['team_id'] = team_id
+                                if team_id in [team.group_id for team in user.teams]:
+                                    team = next(team for team in user.teams if team.group_id == team_id)
+                                    image['team_name'] = team.group_name
+                            
+                            all_images.extend(team_images)
+                        
+                        # 생성 시간 기준으로 정렬 (최신순)
+                        all_images.sort(key=lambda x: x['created_at'], reverse=True)
+                        
+                        # 지정된 limit만큼만 반환
+                        all_images = all_images[:limit]
+                        
+                        await manager.send_message(user_id, {
+                            "type": "team_images_list",
+                            "data": {
+                                "success": True,
+                                "images": all_images,
+                                "total_count": len(all_images),
+                                "message": f"{len(all_images)}개의 팀 이미지를 조회했습니다."
+                            }
+                        })
+                    except Exception as e:
+                        logger.error(f"Failed to get team images: {e}")
+                        await manager.send_message(user_id, {
+                            "type": "error",
+                            "data": {
+                                "success": False,
+                                "message": f"팀 이미지 목록 조회 중 오류: {str(e)}"
+                            }
+                        })
+                
+        except WebSocketDisconnect:
+            logger.info(f"WebSocket disconnected for user: {user_id}")
+        except Exception as e:
+            logger.error(f"WebSocket error: {e}")
+            await manager.send_message(user_id, {
+                "type": "error",
+                "data": {"message": str(e)}
+            })
+        finally:
+            # 백그라운드 태스크 종료
+            update_task.cancel()
+            
+    except Exception as e:
+        logger.error(f"WebSocket connection error: {e}")
+    finally:
+        if user_id:
+            manager.disconnect(user_id)
+
+
+async def handle_websocket_image_generation(
+    websocket: WebSocket,
+    user_id: str,
+    request_data: dict,
+    db: AsyncSession
+):
+    """WebSocket을 통한 이미지 생성 처리"""
+    try:
+        # 진행 상황 업데이트 함수
+        async def send_progress(status: str, progress: int, message: str):
+            await manager.send_message(user_id, {
+                "type": "generation_progress",
+                "data": {
+                    "status": status,
+                    "progress": progress,
+                    "message": message
+                }
+            })
+        
+        # 1. 요청 데이터 검증
+        await send_progress("validating", 5, "요청 데이터 검증 중...")
+        
+        request = ImageGenerationRequest(
+            prompt=request_data.get("prompt", ""),
+            selected_styles=request_data.get("selected_styles", {}),
+            width=request_data.get("width", 1024),
+            height=request_data.get("height", 1024),
+            steps=request_data.get("steps", 8),
+            guidance=request_data.get("guidance", 3.5),
+            seed=request_data.get("seed")
+        )
+        
+        # 2. 사용자 및 그룹 정보 조회
+        await send_progress("preparing", 10, "사용자 정보 확인 중...")
+        user = await _get_user_with_groups(user_id, db)
+        
+        if not user or not user.teams:
+            raise Exception("사용자 정보를 찾을 수 없습니다.")
+        
+        group_id = user.teams[0].group_id
+        
+        # 3. 세션 확인
+        await send_progress("session_check", 15, "세션 상태 확인 중...")
+        user_session_service = get_user_session_service()
+        session_started = await user_session_service.start_image_generation(user_id, db)
+        
+        if not session_started:
+            raise Exception("활성 세션이 없거나 Pod가 준비되지 않았습니다.")
+        
+        # 4. 프롬프트 최적화
+        await send_progress("optimizing", 20, "프롬프트 최적화 중...")
+        prompt_service = get_prompt_optimization_service()
+        
+        try:
+            optimized_prompt = await prompt_service.optimize_flux_prompt(
+                user_prompt=request.prompt,
+                selected_styles=request.selected_styles
+            )
+        except Exception as e:
+            logger.warning(f"프롬프트 최적화 실패: {e}")
+            optimized_prompt = request.prompt
+        
+        # 5. ComfyUI 준비
+        await send_progress("connecting", 30, "이미지 생성 서버 연결 중...")
+        flux_service = get_comfyui_flux_service()
+        
+        session_status = await user_session_service.get_session_status(user_id, db)
+        pod_id = session_status.get("pod_id")
+        
+        from app.services.runpod_service import get_runpod_service
+        runpod_service = get_runpod_service()
+        pod_info = await runpod_service.get_pod_status(pod_id)
+        
+        if not pod_info or not pod_info.endpoint_url:
+            raise Exception("ComfyUI 엔드포인트를 찾을 수 없습니다")
+        
+        comfyui_endpoint = pod_info.endpoint_url
+        
+        # 6. 이미지 생성
+        await send_progress("generating", 50, "이미지 생성 중... (약 30초 소요)")
+        
+        flux_result = await flux_service.generate_image_with_prompt(
+            prompt=optimized_prompt,
+            comfyui_endpoint=comfyui_endpoint,
+            width=request.width,
+            height=request.height,
+            guidance=request.guidance,
+            steps=request.steps
+        )
+        
+        if not flux_result:
+            raise Exception("이미지 생성 실패")
+        
+        # 7. 이미지 다운로드
+        await send_progress("downloading", 70, "생성된 이미지 다운로드 중...")
+        
+        image_data = await flux_service.download_generated_image(
+            comfyui_endpoint=comfyui_endpoint,
+            image_info=flux_result
+        )
+        
+        if not image_data:
+            raise Exception("이미지 다운로드 실패")
+        
+        # 8. S3 업로드
+        await send_progress("uploading", 85, "이미지 저장 중...")
+        
+        s3_service = get_s3_service()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        import uuid
+        image_filename = f"generate_image/team_{group_id}/{user_id}/{timestamp}_{str(uuid.uuid4())[:8]}.png"
+        
+        s3_url = await s3_service.upload_image_data(
+            image_data=image_data,
+            key=image_filename,
+            content_type="image/png"
+        )
+        
+        if not s3_url:
+            raise Exception("이미지 업로드 실패")
+        
+        # 9. 데이터베이스 저장
+        await send_progress("saving", 95, "데이터베이스 저장 중...")
+        
+        image_storage_service = get_image_storage_service()
+        storage_id = await image_storage_service.save_generated_image_url(
+            s3_url=s3_url,
+            group_id=group_id,
+            db=db
+        )
+        
+        # 10. 완료
+        await user_session_service.complete_image_generation(user_id, db)
+        
+        await send_progress("completed", 100, "이미지 생성 완료!")
+        
+        # 최종 결과 전송 (원본 프롬프트 포함)
+        await manager.send_message(user_id, {
+            "type": "generation_complete",
+            "data": {
+                "success": True,
+                "storage_id": storage_id,
+                "s3_url": s3_url,
+                "group_id": group_id,
+                "prompt": request.prompt,  # 원본 프롬프트 추가
+                "optimized_prompt": optimized_prompt,  # 최적화된 프롬프트도 추가
+                "width": request.width,
+                "height": request.height,
+                "message": "이미지가 성공적으로 생성되었습니다."
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"WebSocket image generation failed: {e}")
+        
+        # 에러 발생 시 세션 상태 리셋
+        try:
+            user_session_service = get_user_session_service()
+            await user_session_service.complete_image_generation(user_id, db)
+        except:
+            pass
+        
+        # 에러 메시지 전송
+        await manager.send_message(user_id, {
+            "type": "generation_complete",
+            "data": {
+                "success": False,
+                "error": str(e),
+                "message": f"이미지 생성 실패: {str(e)}"
+            }
+        })
+
+
 async def _get_user_with_groups(user_id: str, db: AsyncSession) -> Optional[User]:
     """사용자 및 그룹 정보 조회"""
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
     
     try:
+        logger.info(f"Looking up user with ID: {user_id}")
         result = await db.execute(
             select(User)
             .options(selectinload(User.teams))
             .where(User.user_id == user_id)
         )
-        return result.scalar_one_or_none()
+        user = result.scalar_one_or_none()
+        
+        if user:
+            logger.info(f"Found user: {user.user_id}, teams count: {len(user.teams) if user.teams else 0}")
+            if user.teams:
+                for team in user.teams:
+                    logger.info(f"Team: group_id={team.group_id}, group_name={team.group_name}")
+        else:
+            logger.warning(f"User not found: {user_id}")
+        
+        return user
     except Exception as e:
         logger.error(f"Failed to get user with groups {user_id}: {e}")
         return None

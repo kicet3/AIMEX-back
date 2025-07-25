@@ -211,10 +211,22 @@ class VLLMClient:
                             try:
                                 data = json.loads(line[6:])  # "data: " 제거
                                 if "text" in data:
+                                    # 유니코드 이스케이프 시퀀스를 올바르게 디코딩
+                                    text = data["text"]
+                                    try:
+                                        # 유니코드 이스케이프 시퀀스가 있는지 확인하고 디코딩
+                                        if "\\u" in text:
+                                            decoded_text = text.encode('utf-8').decode('unicode_escape')
+                                        else:
+                                            decoded_text = text
+                                    except (UnicodeDecodeError, ValueError):
+                                        # 디코딩 실패 시 원본 텍스트 사용
+                                        decoded_text = text
+                                    
                                     logger.debug(
-                                        f"🔄 VLLM 토큰 수신: {repr(data['text'])}"
+                                        f"🔄 VLLM 토큰 수신: {repr(decoded_text)}"
                                     )
-                                    yield data["text"]
+                                    yield decoded_text
                                 elif "error" in data:
                                     logger.error(
                                         f"❌ VLLM 스트리밍 오류: {data['error']}"

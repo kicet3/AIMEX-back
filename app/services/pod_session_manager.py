@@ -4,17 +4,6 @@ Pod 세션 사전 로더 서비스
 사용자가 이미지 생성 페이지에 진입할 때 RunPod를 사전에 실행하고
 15분 입력 대기, 10분 이미지 생성 타임리밋을 관리
 
-SOLID 원칙:
-- SRP: Pod 세션 생명주기 관리만 담당
-- OCP: 새로운 타임아웃 정책 추가 시 확장 가능
-- LSP: 추상 인터페이스로 다른 클라우드 서비스로 교체 가능
-- ISP: 클라이언트별 필요한 메서드만 노출
-- DIP: 구체적인 RunPod 구현이 아닌 추상화에 의존
-
-Clean Architecture:
-- Application Layer: 세션 관리 유스케이스 조정
-- Domain Layer: 세션 생명주기 비즈니스 로직
-- Infrastructure Layer: RunPod API 연동
 """
 
 import asyncio

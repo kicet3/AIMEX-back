@@ -1,16 +1,6 @@
 """
 OpenAI API 서비스
 
-SOLID 원칙:
-- SRP: OpenAI API 연동 및 콘텐츠 생성만 담당
-- OCP: 새로운 AI 모델이나 프롬프트 타입 추가 시 확장 가능
-- LSP: 추상 인터페이스를 구현하여 다른 AI 서비스로 교체 가능
-- ISP: 클라이언트별 인터페이스 분리 (콘텐츠 생성, 프롬프트 생성)
-- DIP: 구체적인 OpenAI 구현이 아닌 추상화에 의존
-
-Clean Architecture:
-- Domain Layer: AI 콘텐츠 생성 비즈니스 로직
-- Infrastructure Layer: 외부 OpenAI API 연동
 """
 
 import os
@@ -78,9 +68,6 @@ class OpenAIService(AIContentGeneratorInterface):
     """
     OpenAI GPT API 서비스 구현
 
-    SOLID 원칙 준수:
-    - SRP: OpenAI API 호출과 응답 처리만 담당
-    - OCP: 새로운 프롬프트 템플릿 추가 시 확장 가능
     """
 
     def __init__(self):

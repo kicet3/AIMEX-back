@@ -100,7 +100,7 @@ class ImageStorageService:
             offset: 조회 시작 위치
             
         Returns:
-            List[Dict]: 이미지 정보 목록
+            List[Dict]: 이미지 정보 목록 (presigned URL 포함)
         """
         try:
             result = await db.execute(
@@ -113,16 +113,23 @@ class ImageStorageService:
             
             images = result.scalars().all()
             
-            return [
-                {
+            image_list = []
+            for image in images:
+                # S3 key 추출 및 presigned URL 생성
+                s3_key = self._extract_s3_key(image.s3_url)
+                presigned_url = None
+                if s3_key:
+                    presigned_url = self.s3_service.generate_presigned_url(s3_key, expiration=86400)  # 24시간
+                
+                image_list.append({
                     "storage_id": image.storage_id,
-                    "s3_url": image.s3_url,
+                    "s3_url": presigned_url or image.s3_url,  # presigned URL 우선, 실패시 원본 URL
                     "group_id": image.group_id,
                     "created_at": image.created_at,
                     "updated_at": image.updated_at
-                }
-                for image in images
-            ]
+                })
+            
+            return image_list
             
         except Exception as e:
             logger.error(f"Failed to get images for group {group_id}: {e}")
@@ -145,7 +152,7 @@ class ImageStorageService:
             offset: 조회 시작 위치
             
         Returns:
-            List[Dict]: 이미지 정보 목록
+            List[Dict]: 이미지 정보 목록 (presigned URL 포함)
         """
         try:
             # 사용자가 속한 그룹 ID들 조회
@@ -176,16 +183,23 @@ class ImageStorageService:
             
             images = result.scalars().all()
             
-            return [
-                {
+            image_list = []
+            for image in images:
+                # S3 key 추출 및 presigned URL 생성
+                s3_key = self._extract_s3_key(image.s3_url)
+                presigned_url = None
+                if s3_key:
+                    presigned_url = self.s3_service.generate_presigned_url(s3_key, expiration=86400)  # 24시간
+                
+                image_list.append({
                     "storage_id": image.storage_id,
-                    "s3_url": image.s3_url,
+                    "s3_url": presigned_url or image.s3_url,  # presigned URL 우선, 실패시 원본 URL
                     "group_id": image.group_id,
                     "created_at": image.created_at,
                     "updated_at": image.updated_at
-                }
-                for image in images
-            ]
+                })
+            
+            return image_list
             
         except Exception as e:
             logger.error(f"Failed to get images for user {user_id}: {e}")
@@ -204,7 +218,7 @@ class ImageStorageService:
             db: 데이터베이스 세션
             
         Returns:
-            Dict: 이미지 정보 또는 None
+            Dict: 이미지 정보 (presigned URL 포함) 또는 None
         """
         try:
             result = await db.execute(
@@ -215,9 +229,15 @@ class ImageStorageService:
             if not image:
                 return None
             
+            # S3 key 추출 및 presigned URL 생성
+            s3_key = self._extract_s3_key(image.s3_url)
+            presigned_url = None
+            if s3_key:
+                presigned_url = self.s3_service.generate_presigned_url(s3_key, expiration=86400)  # 24시간
+            
             return {
                 "storage_id": image.storage_id,
-                "s3_url": image.s3_url,
+                "s3_url": presigned_url or image.s3_url,  # presigned URL 우선, 실패시 원본 URL
                 "group_id": image.group_id,
                 "created_at": image.created_at,
                 "updated_at": image.updated_at
@@ -266,7 +286,7 @@ class ImageStorageService:
             if delete_from_s3:
                 try:
                     # S3 URL에서 키 추출하여 삭제
-                    s3_key = self._extract_s3_key_from_url(image.s3_url)
+                    s3_key = self._extract_s3_key(image.s3_url)
                     if s3_key:
                         await self.s3_service.delete_object(s3_key)
                         logger.info(f"Deleted from S3: {s3_key}")
@@ -346,6 +366,33 @@ class ImageStorageService:
         except Exception as e:
             logger.error(f"Failed to check user group access: {e}")
             return False
+    
+    def _extract_s3_key(self, s3_url: str) -> Optional[str]:
+        """S3 URL에서 객체 키 추출 (presigned URL도 처리)"""
+        try:
+            # presigned URL인 경우 처리
+            if '?' in s3_url:
+                s3_url = s3_url.split('?')[0]
+            
+            # S3 URL 패턴에서 키 추출
+            # https://bucket-name.s3.region.amazonaws.com/key
+            # 또는 https://s3.region.amazonaws.com/bucket-name/key
+            
+            if 's3.amazonaws.com' in s3_url or 's3.' in s3_url:
+                parts = s3_url.split('/')
+                if len(parts) >= 4:
+                    # bucket-name.s3.region.amazonaws.com/key 형태
+                    if '.s3.' in parts[2]:
+                        return '/'.join(parts[3:])
+                    # s3.region.amazonaws.com/bucket-name/key 형태
+                    elif len(parts) >= 5:
+                        return '/'.join(parts[4:])
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to extract S3 key from URL {s3_url}: {e}")
+            return None
     
     def _extract_s3_key_from_url(self, s3_url: str) -> Optional[str]:
         """S3 URL에서 객체 키 추출"""

@@ -1,7 +1,7 @@
 # app/domain/entities/base.py
 """
 도메인 엔티티 기반 클래스
-SOLID 원칙 적용: 단일 책임 원칙 (SRP) - 엔티티는 도메인 로직만 담당
+
 """
 
 from abc import ABC, abstractmethod

@@ -19,9 +19,10 @@ from app.api.v1.endpoints import (
     tts,
     mcp,
     content_enhancement,
-    image_generator,  # 새로운 이미지 생성 API
     user_sessions,  # 새로운 사용자 세션 API
-    image_generation,  # 새로운 통합 이미지 생성 API
+    image_generation,  # 새로운 통합 이미진 생성 API
+    unified_images,
+    prompt_test,  # 프롬프트 최적화 테스트 API
 )
 
 # 기존 복잡한 API들 임시 비활성화 (새로운 간소화된 API 사용)
@@ -126,18 +127,24 @@ api_router.include_router(workflow_only_router, prefix="/workflows", tags=["Work
 # api_router.include_router(prompt_pipelines.router, prefix="/prompt-pipelines", tags=["Prompt Processing"])
 # api_router.include_router(s3_images.router, prefix="/s3-images", tags=["S3 Image Storage"])
 
-# 새로운 이미지 생성 API (통합 서비스)
-api_router.include_router(image_generator.router, tags=["Image Generator"])
 
 # 사용자 세션 관리 API (새로운 간소화된 버전)
 api_router.include_router(
     user_sessions.router, prefix="/user-sessions", tags=["User Sessions"]
 )
 
-# 통합 이미지 생성 API (세션 + ComfyUI + S3)
+# 이미지 생성 API
 api_router.include_router(
     image_generation.router, prefix="/image-generation", tags=["Image Generation"]
 )
+
+# 프롬프트 최적화 테스트 API
+api_router.include_router(
+    prompt_test.router, prefix="/prompt-test", tags=["Prompt Testing"]
+)
+
+# 통합 이미지 API
+api_router.include_router(unified_images.router, prefix="/api/images", tags=["Unified Images"])
 
 # TTS API
 api_router.include_router(tts.router, prefix="/tts", tags=["TTS"])

@@ -9,10 +9,6 @@
 - 세션 상태 업데이트
 - 메모리 정리
 
-SOLID 원칙 준수:
-- SRP: 세션 정리 작업만 담당
-- OCP: 새로운 정리 정책 확장 가능
-- DIP: 서비스 레이어에 의존
 """
 
 import asyncio
@@ -34,13 +30,13 @@ class SessionCleanupService:
     주기적으로 만료된 세션들을 정리하고 리소스를 해제
     """
     
-    def __init__(self, cleanup_interval: int = 300):  # 5분마다
+    def __init__(self, cleanup_interval: int = 300):  # 5분마다 (Pod 종료 감지 향상)
         self.cleanup_interval = cleanup_interval
         self.is_running = False
         self.cleanup_task: Optional[asyncio.Task] = None
         self.user_session_service = get_user_session_service()
         self.image_storage_service = get_image_storage_service()
-        logger.info(f"SessionCleanupService initialized with {cleanup_interval}s interval")
+        logger.info(f"SessionCleanupService initialized with {cleanup_interval}s interval (RunPod 종료 감지 포함)")
     
     async def start(self):
         """백그라운드 정리 작업 시작"""
@@ -89,7 +85,7 @@ class SessionCleanupService:
             start_time = datetime.now()
             
             async with AsyncSessionLocal() as db:
-                # 1. 만료된 사용자 세션 정리
+                # 1. 만료된 사용자 세션 및 종료된 RunPod 정리
                 cleaned_sessions = await self.user_session_service.cleanup_expired_sessions(db)
                 
                 # 2. 고아 이미지 레코드 정리 (선택적) - 임시 비활성화
@@ -101,12 +97,12 @@ class SessionCleanupService:
                 
                 if cleaned_sessions > 0 or orphaned_count > 0:
                     logger.info(
-                        f"Cleanup completed: {cleaned_sessions} sessions, "
-                        f"{orphaned_count} orphaned records, "
-                        f"time: {cleanup_time:.2f}s"
+                        f"🧹 세션 정리 완료: {cleaned_sessions}개 세션 정리 "
+                        f"(만료 세션 + 종료된 RunPod), {orphaned_count}개 고아 레코드, "
+                        f"소요시간: {cleanup_time:.2f}초"
                     )
                 else:
-                    logger.debug(f"Cleanup completed: no items to clean, time: {cleanup_time:.2f}s")
+                    logger.debug(f"🧹 정리할 세션 없음, 소요시간: {cleanup_time:.2f}초")
         
         except Exception as e:
             logger.error(f"Failed to run cleanup: {e}")

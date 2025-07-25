@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     RUNPOD_MAX_WORKERS: int = 1
     RUNPOD_IDLE_TIMEOUT: int = 300
 
+    AIMEX_DOCKER_IMAGE: Optional[str] = "hyunmin94/aimex-comfyui:optimized-v2"
+
     # AWS S3 설정
     AWS_ACCESS_KEY_ID: Optional[str] = None
     AWS_SECRET_ACCESS_KEY: Optional[str] = None

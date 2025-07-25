@@ -1,10 +1,7 @@
 """
 공개 MBTI API 엔드포인트
 인증 없이 접근 가능한 MBTI 및 스타일 프리셋 데이터 제공
-SOLID 원칙 적용:
-- SRP: MBTI 및 스타일 프리셋 데이터 제공만 담당
-- OCP: 새로운 공개 데이터 타입 추가에 열려있음
-- DIP: 데이터베이스 추상화에 의존
+
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query

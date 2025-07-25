@@ -1,17 +1,6 @@
 """
 통합 콘텐츠 생성 서비스
 
-SOLID 원칙:
-- SRP: 전체 콘텐츠 생성 워크플로우 조율만 담당
-- OCP: 새로운 AI 서비스나 워크플로우 단계 추가 시 확장 가능
-- LSP: 각 서비스의 추상 인터페이스를 사용하여 구현체 교체 가능
-- ISP: 클라이언트별 필요한 기능만 제공
-- DIP: 구체적인 서비스 구현이 아닌 추상화에 의존
-
-Clean Architecture:
-- Application Layer: 비즈니스 로직 조율 및 유스케이스 구현
-- Domain Layer: 콘텐츠 생성 도메인 규칙
-- Infrastructure Layer: 외부 서비스 연동
 """
 
 import asyncio

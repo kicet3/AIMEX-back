@@ -1,13 +1,6 @@
 """
 스타일 프리셋 키워드 관리 서비스
 
-SOLID 원칙:
-- SRP: 스타일 프리셋만 담당
-- OCP: 새로운 스타일 추가 확장 가능
-- ISP: 클라이언트별 필요한 인터페이스만 제공
-
-Clean Architecture:
-- Domain Layer: 스타일 프리셋 비즈니스 로직
 """
 
 from typing import Dict, List, Optional
