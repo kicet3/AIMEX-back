@@ -264,6 +264,7 @@ class ComfyUISynthesisService:
                                 
                                 if "outputs" in execution:
                                     logger.info(f"✅ 워크플로우 {prompt_id} 실행 완료")
+                                    logger.info(f"📊 Execution 전체 구조: {json.dumps(execution, indent=2)}")
                                     return self._extract_image_info(execution)
                                 else:
                                     logger.debug(f"⏳ 워크플로우 {prompt_id} 실행 중...")
@@ -287,7 +288,21 @@ class ComfyUISynthesisService:
         """실행 결과에서 이미지 정보 추출"""
         
         try:
+            # 전체 execution 구조 확인
+            logger.info(f"📊 Execution 전체 키: {list(execution.keys())}")
+            
             outputs = execution.get("outputs", {})
+            
+            # outputs가 비어있는지 확인
+            if not outputs:
+                logger.warning("⚠️ outputs가 비어있음")
+                # status나 다른 필드 확인
+                if "status" in execution:
+                    logger.info(f"Execution status: {execution['status']}")
+                return None
+            
+            # 디버깅을 위한 전체 outputs 로깅
+            logger.info(f"📊 Execution outputs 구조: {json.dumps(outputs, indent=2)}")
             
             # SaveImage 노드 (ID: 136)에서 이미지 정보 추출
             save_node = outputs.get("136", {})
@@ -305,7 +320,25 @@ class ComfyUISynthesisService:
                         "format": image_info.get("format", "png")
                     }
             
+            # 136번 노드에서 못 찾으면 모든 노드에서 SaveImage 타입 찾기
+            logger.warning("⚠️ 노드 136에서 이미지를 찾을 수 없음. 모든 노드 검색 중...")
+            
+            for node_id, node_output in outputs.items():
+                if isinstance(node_output, dict) and "images" in node_output:
+                    images = node_output["images"]
+                    if images and len(images) > 0:
+                        image_info = images[0]
+                        logger.info(f"✅ 노드 {node_id}에서 이미지 정보 발견")
+                        
+                        return {
+                            "filename": image_info.get("filename"),
+                            "subfolder": image_info.get("subfolder", ""),
+                            "type": image_info.get("type", "output"),
+                            "format": image_info.get("format", "png")
+                        }
+            
             logger.error("❌ 실행 결과에서 이미지 정보를 찾을 수 없음")
+            logger.error(f"❌ outputs 노드 목록: {list(outputs.keys())}")
             return None
             
         except Exception as e:

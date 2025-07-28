@@ -99,14 +99,12 @@ class PromptOptimizationService:
             logger.info(f"🔄 Flux 프롬프트 최적화 시작: '{user_prompt[:50]}...'")
             logger.info(f"📝 선택된 스타일: {selected_styles}")
             
-            # 스타일 키워드 수집
-            style_keywords = self._collect_flux_style_keywords(selected_styles or {})
             
             # OpenAI를 통한 프롬프트 최적화
-            optimized_prompt = await self._optimize_flux_with_openai(user_prompt, style_keywords)
+            optimized_prompt = await self._optimize_flux_with_openai(user_prompt, selected_styles)
             
             # 최종 프롬프트 구성
-            final_prompt = self._build_flux_final_prompt(optimized_prompt, style_keywords)
+            final_prompt = self._build_flux_final_prompt(optimized_prompt, selected_styles)
             
             logger.info(f"✅ Flux 프롬프트 최적화 완료: '{final_prompt[:50]}...'")
             return final_prompt
@@ -467,7 +465,7 @@ Return ONLY the optimized English prompt for Flux.1-dev, no explanations or quot
             logger.error(f"❌ OpenAI API 호출 실패: {e}")
             raise
     
-    def _build_flux_final_prompt(self, optimized_prompt: str, style_keywords: Dict[str, str]) -> str:
+    def _build_flux_final_prompt(self, optimized_prompt: str, selected_styles: Dict[str, str]) -> str:
         """Flux용 최종 프롬프트 구성"""
         
         # 기본 프롬프트
@@ -476,7 +474,7 @@ Return ONLY the optimized English prompt for Flux.1-dev, no explanations or quot
         # 스타일 키워드 추가 (중복 제거)
         existing_keywords = optimized_prompt.lower()
         
-        for category, keywords in style_keywords.items():
+        for category, keywords in selected_styles.items():
             # 이미 포함된 키워드는 제외
             unique_keywords = []
             for keyword in keywords.split(", "):
