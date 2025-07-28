@@ -6,7 +6,9 @@ ComfyUI가 설치된 서버 인스턴스를 동적으로 생성/관리
 import asyncio
 import aiohttp
 import logging
+import json
 from typing import Dict, Optional, Any
+from datetime import datetime, timedelta
 from pydantic import BaseModel
 from app.core.config import settings
 
@@ -1310,8 +1312,65 @@ class RunPodService:
         except Exception as e:
             logger.error(f"GPU 가용성 조회 중 오류: {e}")
             return {}
-    
-    
+
+    async def get_remaining_credits(self) -> Optional[Dict[str, Any]]:
+        """RunPod 남은 크레딧 조회"""
+        try:
+            if not self.api_key:
+                logger.warning("RunPod API 키가 설정되지 않았습니다")
+                return None
+
+            # GraphQL 쿼리 (단순화)
+            query = """
+            query myself {
+                myself {
+                    clientBalance
+                }
+            }
+            """
+
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
+
+            payload = {
+                "query": query
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.base_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=30
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        if "data" in data and "myself" in data["data"]:
+                            client_balance = data["data"]["myself"].get("clientBalance", 0)
+                            
+                            result = {
+                                "remaining_credits": client_balance,
+                                "last_updated": datetime.utcnow().isoformat()
+                            }
+                            
+                            logger.info(f"RunPod 크레딧 조회 성공: {client_balance} 크레딧 남음")
+                            return result
+                        else:
+                            logger.error(f"RunPod API 응답 형식 오류: {data}")
+                            return None
+                    else:
+                        logger.error(f"RunPod API 요청 실패: {response.status}")
+                        return None
+
+        except aiohttp.ClientError as e:
+            logger.error(f"RunPod API 네트워크 오류: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"RunPod 크레딧 조회 실패: {e}")
+            return None
 
 
 # 싱글톤 패턴
