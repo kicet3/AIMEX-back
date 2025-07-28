@@ -79,6 +79,7 @@ class AIInfluencerBase(BaseModel):
     learning_status: int
     influencer_model_repo: str
     chatbot_option: bool
+    system_prompt: Optional[str] = None
     # Instagram 연동 정보
     instagram_id: Optional[str] = None
     instagram_username: Optional[str] = None
