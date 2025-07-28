@@ -1,0 +1,260 @@
+{
+  "1": {
+    "inputs": {
+      "image": "ComfyUI_temp_pxztn_00004_.png"
+    },
+    "class_type": "DiptychCreate",
+    "_meta": {
+      "title": "DiptychCreate~"
+    }
+  },
+  "4": {
+    "inputs": {
+      "unet_name": "FLUX/flux1-fill-dev.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "확산 모델 로드"
+    }
+  },
+  "6": {
+    "inputs": {
+      "seed": 379108430789053,
+      "steps": 30,
+      "cfg": 0.8,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "22",
+        0
+      ],
+      "positive": [
+        "15",
+        0
+      ],
+      "negative": [
+        "15",
+        1
+      ],
+      "latent_image": [
+        "15",
+        2
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "8": {
+    "inputs": {
+      "clip_name1": "t5xxl_fp16.safetensors",
+      "clip_name2": "clip_l.safetensors",
+      "type": "flux",
+      "device": "default"
+    },
+    "class_type": "DualCLIPLoader",
+    "_meta": {
+      "title": "이중 CLIP 로드"
+    }
+  },
+  "9": {
+    "inputs": {
+      "editText": "Make her hair sky blue",
+      "speak_and_recognation": {
+        "__value__": [
+          false,
+          true
+        ]
+      },
+      "clip": [
+        "22",
+        1
+      ]
+    },
+    "class_type": "InContextEditInstruction",
+    "_meta": {
+      "title": "InContextEditInstruction~"
+    }
+  },
+  "10": {
+    "inputs": {
+      "guidance": 50,
+      "conditioning": [
+        "16",
+        0
+      ]
+    },
+    "class_type": "FluxGuidance",
+    "_meta": {
+      "title": "FLUX 가이드"
+    }
+  },
+  "11": {
+    "inputs": {
+      "conditioning": [
+        "16",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "조건 (0으로 출력)"
+    }
+  },
+  "13": {
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "VAE 로드"
+    }
+  },
+  "14": {
+    "inputs": {
+      "anything": [
+        "13",
+        0
+      ]
+    },
+    "class_type": "Anything Everywhere",
+    "_meta": {
+      "title": "Anything Everywhere"
+    }
+  },
+  "15": {
+    "inputs": {
+      "In_context": [
+        "10",
+        0
+      ],
+      "negative": [
+        "11",
+        0
+      ],
+      "diptych": [
+        "1",
+        0
+      ],
+      "maskDiptych": [
+        "1",
+        1
+      ],
+      "vae": [
+        "13",
+        0
+      ]
+    },
+    "class_type": "ICEFConditioning",
+    "_meta": {
+      "title": "ICEFConditioning~"
+    }
+  },
+  "16": {
+    "inputs": {
+      "anything": [
+        "9",
+        0
+      ]
+    },
+    "class_type": "easy cleanGpuUsed",
+    "_meta": {
+      "title": "Clean VRAM Used"
+    }
+  },
+  "17": {
+    "inputs": {
+      "samples": [
+        "6",
+        0
+      ],
+      "vae": [
+        "13",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE 디코드"
+    }
+  },
+  "19": {
+    "inputs": {
+      "width": 512,
+      "height": 512,
+      "x": 512,
+      "y": 0,
+      "image": [
+        "17",
+        0
+      ]
+    },
+    "class_type": "ImageCrop",
+    "_meta": {
+      "title": "이미지 자르기"
+    }
+  },
+  "21": {
+    "inputs": {
+      "anything": [
+        "19",
+        0
+      ]
+    },
+    "class_type": "easy cleanGpuUsed",
+    "_meta": {
+      "title": "Clean VRAM Used"
+    }
+  },
+  "22": {
+    "inputs": {
+      "PowerLoraLoaderHeaderWidget": {
+        "type": "PowerLoraLoaderHeaderWidget"
+      },
+      "lora_1": {
+        "on": false,
+        "lora": "FLUX/LoRAhnb-North Shore - Korean Exquisite Sweet and Spicy Girl Face Model - Yoon Zhi_v1.safetensors",
+        "strength": 0.6
+      },
+      "lora_2": {
+        "on": false,
+        "lora": "FLUX/aidmarealisticskin_aidmaRealisticSkin-FLUX-v0.1.safetensors",
+        "strength": 1
+      },
+      "lora_3": {
+        "on": true,
+        "lora": "FLUX/icedit2_svd__extracted_lora_rank_32-bf16-new.safetensors",
+        "strength": 1
+      },
+      "Add Lora": "",
+      "model": [
+        "4",
+        0
+      ],
+      "clip": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "Power Lora Loader (rgthree)",
+    "_meta": {
+      "title": "Power Lora Loader (rgthree)"
+    }
+  },
+  "24": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "19",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "이미지 저장"
+    }
+  }
+}

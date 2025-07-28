@@ -233,6 +233,116 @@ class S3Service:
             logger.error(f"QA 결과 업로드 중 오류: {e}")
             return {"processed_qa_url": None, "raw_results_url": None}
 
+    async def download_image_data(self, s3_url: str) -> Optional[bytes]:
+        """
+        S3 URL에서 이미지 데이터 다운로드
+        
+        Args:
+            s3_url: S3 URL (전체 URL 또는 S3 키)
+            
+        Returns:
+            bytes: 이미지 데이터 또는 None
+        """
+        if not self.is_available():
+            logger.error("S3 서비스를 사용할 수 없습니다")
+            return None
+            
+        try:
+            # S3 URL에서 키 추출
+            if s3_url.startswith('https://'):
+                # Presigned URL의 경우 쿼리 파라미터 제거
+                base_url = s3_url.split('?')[0]
+                
+                # URL 형식에 따라 키 추출
+                if '.amazonaws.com/' in base_url:
+                    # https://bucket-name.s3.region.amazonaws.com/key 형식
+                    key = base_url.split('.amazonaws.com/')[-1]
+                elif f's3.{self.aws_region}.amazonaws.com/{self.bucket_name}/' in base_url:
+                    # https://s3.region.amazonaws.com/bucket-name/key 형식
+                    key = base_url.split(f'{self.bucket_name}/')[-1]
+                else:
+                    # 기본 처리
+                    key = base_url.split('/')[-1]
+            else:
+                # S3 키로 직접 전달된 경우
+                # presigned URL 파라미터가 포함되어 있을 수 있으므로 제거
+                if '?' in s3_url:
+                    key = s3_url.split('?')[0]
+                else:
+                    key = s3_url
+                
+            logger.info(f"S3에서 이미지 다운로드 시작: {key}")
+            logger.debug(f"원본 URL: {s3_url}")
+            
+            # S3에서 객체 가져오기
+            response = self.s3_client.get_object(Bucket=self.bucket_name, Key=key)
+            image_data = response['Body'].read()
+            
+            logger.info(f"S3 이미지 다운로드 성공: {len(image_data)} bytes")
+            return image_data
+            
+        except ClientError as e:
+            logger.error(f"S3 이미지 다운로드 실패: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"S3 이미지 다운로드 중 예외 발생: {e}")
+            return None
+    
+    async def list_objects(self, prefix: str, max_keys: int = 1000) -> List[Dict[str, Any]]:
+        """
+        S3에서 객체 목록 조회
+        
+        Args:
+            prefix: 조회할 경로 prefix
+            max_keys: 최대 반환 개수
+            
+        Returns:
+            객체 정보 리스트
+        """
+        if not self.is_available():
+            logger.error("S3 서비스를 사용할 수 없습니다")
+            return []
+            
+        try:
+            objects = []
+            continuation_token = None
+            
+            while True:
+                # list_objects_v2 파라미터 설정
+                params = {
+                    'Bucket': self.bucket_name,
+                    'Prefix': prefix,
+                    'MaxKeys': max_keys
+                }
+                
+                if continuation_token:
+                    params['ContinuationToken'] = continuation_token
+                
+                # S3 객체 목록 조회
+                response = self.s3_client.list_objects_v2(**params)
+                
+                # 객체 추가
+                if 'Contents' in response:
+                    objects.extend(response['Contents'])
+                
+                # 다음 페이지가 있는지 확인
+                if response.get('IsTruncated', False):
+                    continuation_token = response.get('NextContinuationToken')
+                else:
+                    break
+                    
+                # max_keys에 도달하면 중단
+                if len(objects) >= max_keys:
+                    objects = objects[:max_keys]
+                    break
+            
+            logger.info(f"S3에서 {len(objects)}개의 객체를 조회했습니다. (prefix: {prefix})")
+            return objects
+            
+        except Exception as e:
+            logger.error(f"S3 객체 목록 조회 중 오류: {e}")
+            return []
+
     def delete_file(self, s3_key: str) -> bool:
         """
         S3에서 파일 삭제

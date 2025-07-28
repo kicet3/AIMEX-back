@@ -468,6 +468,14 @@ async def createnew_influencer(
         f"🚀 API: 인플루언서 생성 요청 - user_id: {user_id}, name: {influencer_data.influencer_name}"
     )
 
+    # mbti_id가 전달되었지만 mbti 텍스트가 없는 경우, mbti 텍스트 조회하여 설정
+    if influencer_data.mbti_id and not influencer_data.mbti:
+        from app.models.influencer import ModelMBTI
+        mbti_record = db.query(ModelMBTI).filter(ModelMBTI.mbti_id == influencer_data.mbti_id).first()
+        if mbti_record:
+            influencer_data.mbti = mbti_record.mbti_name
+            logger.info(f"✅ mbti_id {influencer_data.mbti_id}에서 MBTI 타입 '{mbti_record.mbti_name}' 자동 설정")
+
     # 인플루언서 생성
     influencer = create_influencer(db, user_id, influencer_data)
 
@@ -516,6 +524,14 @@ async def create_influencer_with_image(
         logger.info(
             f"🚀 API: 이미지와 함께 인플루언서 생성 요청 - user_id: {user_id}, name: {influencer_create.influencer_name}"
         )
+        
+        # mbti_id가 전달되었지만 mbti 텍스트가 없는 경우, mbti 텍스트 조회하여 설정
+        if influencer_create.mbti_id and not influencer_create.mbti:
+            from app.models.influencer import ModelMBTI
+            mbti_record = db.query(ModelMBTI).filter(ModelMBTI.mbti_id == influencer_create.mbti_id).first()
+            if mbti_record:
+                influencer_create.mbti = mbti_record.mbti_name
+                logger.info(f"✅ mbti_id {influencer_create.mbti_id}에서 MBTI 타입 '{mbti_record.mbti_name}' 자동 설정")
         
         # 이미지가 있으면 S3에 업로드
         if image:

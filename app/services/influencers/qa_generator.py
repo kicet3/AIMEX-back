@@ -147,8 +147,6 @@ class InfluencerQAGenerator:
         if num_requests is None:
             num_requests = settings.QA_GENERATION_COUNT
         
-        print(f"QA 생성 요청: {num_requests}개 (환경변수 QA_GENERATION_COUNT: {settings.QA_GENERATION_COUNT})")
-        
         # VLLM 서버 URL 설정
         vllm_server_url = getattr(settings, 'VLLM_BASE_URL', 'http://localhost:8000')
         

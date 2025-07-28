@@ -64,7 +64,8 @@ class ComfyUIFluxService:
         width: int = 1024,
         height: int = 1024,
         guidance: float = 3.5,
-        steps: int = 8
+        steps: int = 8,
+        lora_settings: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
         """
         프롬프트를 워크플로우에 인젝션하여 이미지 생성
@@ -87,7 +88,7 @@ class ComfyUIFluxService:
             
             # 워크플로우 복사 및 프롬프트 인젝션
             workflow = self._inject_prompt_to_workflow(
-                prompt, width, height, guidance, steps
+                prompt, width, height, guidance, steps, lora_settings
             )
             print('워크 플로우!!',workflow)
             # ComfyUI API로 워크플로우 실행
@@ -110,7 +111,8 @@ class ComfyUIFluxService:
         width: int, 
         height: int, 
         guidance: float, 
-        steps: int
+        steps: int,
+        lora_settings: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """워크플로우에 프롬프트 및 파라미터 인젝션"""
         
@@ -134,6 +136,37 @@ class ComfyUIFluxService:
             workflow["30"]["inputs"]["height"] = height
             logger.info(f"✅ 해상도 설정 완료 (ModelSamplingFlux): {width}x{height}")
         
+        # LoRA 설정 적용 (선택된 스타일에 따라)
+        if lora_settings:
+            # 첫 번째 LoRA 노드 (46) - FLUX.1-Turbo-Alpha (기본 스타일)
+            if "46" in workflow and workflow["46"].get("class_type") == "NunchakuFluxLoraLoader":
+                # 기본값 유지 (Turbo Alpha는 항상 활성화)
+                logger.info(f"✅ 기본 LoRA 유지: FLUX.1-Turbo-Alpha (strength: 1.0)")
+            
+            # 두 번째 LoRA 노드 (47) - 인종 특성 LoRA 동적 변경
+            if "47" in workflow and workflow["47"].get("class_type") == "NunchakuFluxLoraLoader":
+                # 선택된 스타일에 따라 LoRA 변경
+                style_type = lora_settings.get("style_type", "default")
+                
+                if style_type == "asian":
+                    # 동양인 스타일 LoRA
+                    workflow["47"]["inputs"]["lora_name"] = "FLUX/LoRAhnb-North Shore - Korean Exquisite Sweet and Spicy Girl Face Model - Yoon Zhi_v1.safetensors"
+                    workflow["47"]["inputs"]["lora_strength"] = lora_settings.get("lora_strength", 0.6)
+                    logger.info(f"✅ 동양인 스타일 LoRA 적용 (strength: {workflow['47']['inputs']['lora_strength']})")
+                elif style_type == "western":
+                    # 서양인 스타일 LoRA (기존 NSFW_master 대신 적절한 서양인 LoRA로 변경 필요)
+                    workflow["47"]["inputs"]["lora_name"] = "FLUX/aidmarealisticskin_aidmaRealisticSkin-FLUX-v0.1.safetensors"
+                    workflow["47"]["inputs"]["lora_strength"] = lora_settings.get("lora_strength", 1.0)
+                    logger.info(f"✅ 서양인 스타일 LoRA 적용 (strength: {workflow['47']['inputs']['lora_strength']})")
+                elif style_type == "mixed":
+                    # 혼합 스타일 - 중간 강도로 설정
+                    workflow["47"]["inputs"]["lora_name"] = "FLUX/LoRAhnb-North Shore - Korean Exquisite Sweet and Spicy Girl Face Model - Yoon Zhi_v1.safetensors"
+                    workflow["47"]["inputs"]["lora_strength"] = 0.3
+                    logger.info(f"✅ 혼합 스타일 LoRA 적용 (strength: 0.3)")
+                else:
+                    # 기본값 - LoRA 비활성화
+                    workflow["47"]["inputs"]["lora_strength"] = 0.0
+                    logger.info(f"✅ LoRA 비활성화 (기본 스타일)")
         
         return workflow
     
