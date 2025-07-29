@@ -9,6 +9,8 @@ from app.models.user import User
 from app.utils.auth_helpers import AuthHelper
 from app.utils.error_handlers import handle_api_errors
 
+import logging
+logger = logging.getLogger(__name__)
 
 class InstagramConnectRequest(BaseModel):
     code: str
@@ -31,10 +33,6 @@ async def connect_instagram_account(db: Session, user_id: str, influencer_id: st
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to connect Instagram account: {str(e)}"
         )
-    
-    # 디버깅 로그 추가
-    import logging
-    logger = logging.getLogger(__name__)
     
     logger.info(f"📋 Instagram 연동 데이터:")
     logger.info(f"   - 전체 instagram_data: {instagram_data}")
@@ -132,14 +130,22 @@ async def get_instagram_status(db: Session, user_id: str, influencer_id: str):
     instagram_info = None
     if influencer.instagram_is_active and not token_expired and influencer.instagram_access_token:
         try:
+            logger.info(f"🔄 Instagram API 호출 시도...")
             social_auth = SocialAuthService()
             instagram_info = await social_auth.get_instagram_user_info(
                 influencer.instagram_id, 
                 influencer.instagram_access_token
             )
-        except Exception:
+            logger.info(f"✅ Instagram API 호출 성공: {instagram_info}")
+        except Exception as e:
+            logger.error(f"❌ Instagram API 호출 실패: {str(e)}")
             # API 호출 실패 시 토큰 만료로 간주
             token_expired = True
+    else:
+        logger.info(f"⚠️ Instagram API 호출 조건 불충족:")
+        logger.info(f"   - instagram_is_active: {influencer.instagram_is_active}")
+        logger.info(f"   - not token_expired: {not token_expired}")
+        logger.info(f"   - access_token 존재: {bool(influencer.instagram_access_token)}")
     
     return {
         "is_connected": influencer.instagram_is_active or False,
