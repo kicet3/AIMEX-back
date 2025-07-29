@@ -308,7 +308,7 @@ async def upload_influencer_image(
                 # 기존 인플루언서 정보 조회
                 from app.services.influencers.crud import get_influencer_by_id
 
-                existing_influencer = get_influencer_by_id(db, user_id, influencer_id)
+                existing_influencer = await get_influencer_by_id(db, user_id, influencer_id)
 
                 if existing_influencer and getattr(
                     existing_influencer, "image_url", None
@@ -384,7 +384,7 @@ async def get_influencers(
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found")
 
-    influencers = get_influencers_list(db, user_id, skip, limit)
+    influencers = await get_influencers_list(db, user_id, skip, limit)
 
     # 각 인플루언서의 이미지 URL을 S3 presigned URL로 변환
     for influencer in influencers:
@@ -424,7 +424,7 @@ async def get_influencer(
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found")
 
-    influencer = get_influencer_by_id(db, user_id, influencer_id)
+    influencer = await get_influencer_by_id(db, user_id, influencer_id)
 
     # 이미지 URL을 S3 presigned URL로 변환
     if influencer.image_url:
@@ -467,7 +467,7 @@ async def createnew_influencer(
     logger.info(
         f"🚀 API: 인플루언서 생성 요청 - user_id: {user_id}, name: {influencer_data.influencer_name}"
     )
-
+    print(f"influencer_data: {influencer_data}")
     # mbti_id가 전달되었지만 mbti 텍스트가 없는 경우, mbti 텍스트 조회하여 설정
     if influencer_data.mbti_id and not influencer_data.mbti:
         from app.models.influencer import ModelMBTI
@@ -477,7 +477,7 @@ async def createnew_influencer(
             logger.info(f"✅ mbti_id {influencer_data.mbti_id}에서 MBTI 타입 '{mbti_record.mbti_name}' 자동 설정")
 
     # 인플루언서 생성
-    influencer = create_influencer(db, user_id, influencer_data)
+    influencer = await create_influencer(db, user_id, influencer_data)
 
     # 환경변수로 자동 QA 생성 제어
     auto_qa_enabled = os.getenv("AUTO_FINETUNING_ENABLED", "true").lower() == "true"
@@ -562,7 +562,7 @@ async def create_influencer_with_image(
             logger.info(f"🖼️ 인플루언서 이미지 S3 업로드 성공: {s3_key}")
         
         # 인플루언서 생성
-        influencer = create_influencer(db, user_id, influencer_create)
+        influencer = await create_influencer(db, user_id, influencer_create)
         
         # 이미지가 있었다면 실제 인플루언서 ID로 S3 키 업데이트 (선택사항)
         # 현재는 임시 ID를 사용하므로 필요시 구현
@@ -623,7 +623,7 @@ async def delete_existing_influencer(
     user_id = current_user.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found")
-    return delete_influencer(db, user_id, influencer_id)
+    return await delete_influencer(db, user_id, influencer_id)
 
 
 # Instagram 비즈니스 계정 연동 관련 API
@@ -694,7 +694,7 @@ async def trigger_qa_generation(
         raise HTTPException(status_code=401, detail="User ID not found")
 
     # 인플루언서 존재 확인
-    influencer = get_influencer_by_id(db, user_id, influencer_id)
+    influencer = await get_influencer_by_id(db, user_id, influencer_id)
     if not influencer:
 
         raise HTTPException(status_code=404, detail="인플루언서를 찾을 수 없습니다")
@@ -727,7 +727,7 @@ async def get_qa_generation_status(
         raise HTTPException(status_code=401, detail="User ID not found")
 
     # 인플루언서 존재 확인
-    influencer = get_influencer_by_id(db, user_id, influencer_id)
+    influencer = await get_influencer_by_id(db, user_id, influencer_id)
     if not influencer:
         raise HTTPException(status_code=404, detail="인플루언서를 찾을 수 없습니다")
 
@@ -843,7 +843,7 @@ async def cancel_qa_generation(
         raise HTTPException(status_code=401, detail="User ID not found")
 
     # 인플루언서 존재 확인
-    influencer = get_influencer_by_id(db, user_id, influencer_id)
+    influencer = await get_influencer_by_id(db, user_id, influencer_id)
     if not influencer:
         raise HTTPException(status_code=404, detail="인플루언서를 찾을 수 없습니다")
 
@@ -942,7 +942,7 @@ async def get_finetuning_status(
         raise HTTPException(status_code=401, detail="User ID not found")
 
     # 인플루언서 존재 확인
-    influencer = get_influencer_by_id(db, user_id, influencer_id)
+    influencer = await get_influencer_by_id(db, user_id, influencer_id)
     if not influencer:
         raise HTTPException(status_code=404, detail="인플루언서를 찾을 수 없습니다")
 
@@ -1284,7 +1284,7 @@ async def save_system_prompt(
 
     try:
         # 인플루언서 조회
-        influencer = get_influencer_by_id(db, user_id, influencer_id)
+        influencer = await get_influencer_by_id(db, user_id, influencer_id)
         if not influencer:
             raise HTTPException(status_code=404, detail="인플루언서를 찾을 수 없습니다")
 
@@ -1793,7 +1793,7 @@ async def upload_base_voice(
         raise HTTPException(status_code=401, detail="User ID not found")
 
     # 인플루언서 존재 확인
-    influencer = get_influencer_by_id(db, user_id, influencer_id)
+    influencer = await get_influencer_by_id(db, user_id, influencer_id)
     if not influencer:
         raise HTTPException(status_code=404, detail="인플루언서를 찾을 수 없습니다")
 
@@ -1905,7 +1905,7 @@ async def get_base_voice(
         raise HTTPException(status_code=401, detail="User ID not found")
 
     # 인플루언서 존재 확인
-    influencer = get_influencer_by_id(db, user_id, influencer_id)
+    influencer = await get_influencer_by_id(db, user_id, influencer_id)
     if not influencer:
         raise HTTPException(status_code=404, detail="인플루언서를 찾을 수 없습니다")
 
@@ -1963,7 +1963,7 @@ async def get_generated_voices(
         raise HTTPException(status_code=401, detail="User ID not found")
 
     # 인플루언서 존재 확인
-    influencer = get_influencer_by_id(db, user_id, influencer_id)
+    influencer = await get_influencer_by_id(db, user_id, influencer_id)
     if not influencer:
         raise HTTPException(status_code=404, detail="인플루언서를 찾을 수 없습니다")
 

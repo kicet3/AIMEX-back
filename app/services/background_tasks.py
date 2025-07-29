@@ -34,7 +34,7 @@ class BackgroundTaskManager:
             
             try:
                 # QA 생성 작업 시작
-                task_id = self.qa_generator.start_qa_generation(influencer_id, db, user_id)
+                task_id = await self.qa_generator.start_qa_generation(influencer_id, db, user_id)
                 logger.info(f"✅ 백그라운드: QA 생성 작업 시작 완료 - task_id={task_id}")
                 
             finally:

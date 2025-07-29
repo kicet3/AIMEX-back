@@ -4,6 +4,7 @@ from app.models.influencer import AIInfluencer, ModelMBTI, StylePreset, Influenc
 from app.schemas.influencer import AIInfluencerCreate, AIInfluencerUpdate
 from app.utils.data_mapping import DataMapper
 from fastapi import HTTPException, status
+from app.services.vllm_client import VLLMClient, VLLMServerConfig
 import uuid
 import logging
 from datetime import datetime
@@ -11,7 +12,7 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
-def get_influencer_by_id(db: Session, user_id: str, influencer_id: str):
+async def get_influencer_by_id(db: Session, user_id: str, influencer_id: str):
     """인플루언서 조회 (권한 체크 포함)"""
     from app.models.user import User
 
@@ -48,7 +49,7 @@ def get_influencer_by_id(db: Session, user_id: str, influencer_id: str):
     return influencer
 
 
-def get_influencers_list(db: Session, user_id: str, skip: int = 0, limit: int = 100):
+async def get_influencers_list(db: Session, user_id: str, skip: int = 0, limit: int = 100):
     """인플루언서 목록 조회 (권한 체크 포함)"""
     from app.models.user import User
 
@@ -81,7 +82,7 @@ def get_influencers_list(db: Session, user_id: str, skip: int = 0, limit: int = 
     return influencers
 
 
-def create_influencer(db: Session, user_id: str, influencer_data: AIInfluencerCreate):
+async def create_influencer(db: Session, user_id: str, influencer_data: AIInfluencerCreate):
     """새 AI 인플루언서 생성"""
     logger.info(
         f"🎨 인플루언서 생성 시작 - user_id: {user_id}, name: {influencer_data.influencer_name}"
@@ -93,7 +94,6 @@ def create_influencer(db: Session, user_id: str, influencer_data: AIInfluencerCr
     style_preset_id = influencer_data.style_preset_id
     if not style_preset_id:
         if influencer_data.personality and influencer_data.tone:
-
             age_group = DataMapper.map_age_to_group(influencer_data.age)
 
             preset_data = StylePresetCreate(
@@ -110,7 +110,7 @@ def create_influencer(db: Session, user_id: str, influencer_data: AIInfluencerCr
                 influencer_description=influencer_data.influencer_description or f"{influencer_data.influencer_name}의 AI 인플루언서",
                 system_prompt=influencer_data.system_prompt,  # 시스템 프롬프트 추가
             )
-
+            print(preset_data)
             style_preset = create_style_preset(db, preset_data)
             style_preset_id = style_preset.style_preset_id
         else:
@@ -190,11 +190,54 @@ def create_influencer(db: Session, user_id: str, influencer_data: AIInfluencerCr
             final_system_prompt = style_preset.system_prompt
             logger.info(f"📝 프리셋에서 시스템 프롬프트 가져옴: {style_preset_id}")
     
-    # 말투 정보 처리 (기존 로직 유지)
+    # 말투 정보 처리 - tone_data가 있고 system_prompt가 없으면 분석
     if influencer_data.tone_type and influencer_data.tone_data:
         logger.info(f"📝 말투 정보 처리: type={influencer_data.tone_type}")
-        final_system_prompt = influencer_data.tone_data
-
+        
+        # system_prompt가 없으면 tone_data를 분석하여 생성
+        if not influencer_data.system_prompt and not final_system_prompt:
+            logger.info("🔍 tone_data 분석을 통한 시스템 프롬프트 생성 시작")
+            try:
+                # vLLM 클라이언트 생성
+                from app.core.config import settings
+                vllm_config = VLLMServerConfig(
+                    base_url=settings.VLLM_BASE_URL,
+                    timeout=getattr(settings, 'VLLM_TIMEOUT', 300)
+                )
+                
+                # 캐릭터 정보 구성
+                character_info = {
+                    "name": influencer_data.influencer_name,
+                    "description": influencer_data.influencer_description or "",
+                    "age": influencer_data.age,
+                    "personality": influencer_data.personality,
+                    "mbti": influencer_data.mbti or "MBTI 정보 없음",
+                    "gender": influencer_data.gender or "성별 정보 없음"
+                }
+                
+                # tone_data 분석
+                async with VLLMClient(vllm_config) as vllm_client:
+                    analysis_result = await vllm_client.analyze_tone_data(
+                        tone_data=influencer_data.tone_data,
+                        character_info=character_info
+                    )
+                
+                # 분석된 시스템 프롬프트 사용
+                final_system_prompt = analysis_result.get("system_prompt", "")
+                logger.info(f"✅ 시스템 프롬프트 생성 완료: {final_system_prompt[:100]}...")
+                
+                # 분석 결과도 별도로 저장할 수 있음 (필요시)
+                # influencer_create_data["tone_analysis"] = analysis_result.get("tone_analysis", "")
+                
+            except Exception as e:
+                logger.error(f"❌ tone_data 분석 실패: {e}")
+                # 분석 실패시 기본 프롬프트 사용
+                final_system_prompt = f"당신은 {influencer_data.influencer_name}입니다. 주어진 대사 스타일로 대화해주세요."
+        else:
+            # 이미 system_prompt가 있으면 그대로 사용
+            final_system_prompt = influencer_data.system_prompt or final_system_prompt
+    
+    print(f"final_system_prompt: {final_system_prompt}")
     # 인플루언서 생성 데이터 준비
     influencer_create_data = {
         "influencer_id": str(uuid.uuid4()),
@@ -224,6 +267,7 @@ def create_influencer(db: Session, user_id: str, influencer_data: AIInfluencerCr
     try:
         # 인플루언서 생성
         influencer = AIInfluencer(**influencer_create_data)
+        print(f"influencer: {influencer}")
         db.add(influencer)
         db.flush()  # ID 생성을 위해 flush
 
@@ -269,10 +313,10 @@ async def update_influencer(
     db: Session, user_id: str, influencer_id: str, influencer_update: AIInfluencerUpdate
 ):
     """AI 인플루언서 정보 수정"""
-    influencer = get_influencer_by_id(db, user_id, influencer_id)
+    influencer = await get_influencer_by_id(db, user_id, influencer_id)
 
     # 업데이트할 필드들
-    update_data = influencer_update.dict(exclude_unset=True)
+    update_data = influencer_update.model_dump(exclude_unset=True)
     
     # chatbot_option이 활성화되는지 확인
     if 'chatbot_option' in update_data and update_data['chatbot_option'] == True:
@@ -317,9 +361,9 @@ async def update_influencer(
     return influencer
 
 
-def delete_influencer(db: Session, user_id: str, influencer_id: str):
+async def delete_influencer(db: Session, user_id: str, influencer_id: str):
     """AI 인플루언서 삭제"""
-    influencer = get_influencer_by_id(db, user_id, influencer_id)
+    influencer = await get_influencer_by_id(db, user_id, influencer_id)
 
     # 연관된 데이터 삭제 순서가 중요함 (외래키 제약 때문에)
     from app.models.influencer import BatchKey, InfluencerAPI, APICallAggregation

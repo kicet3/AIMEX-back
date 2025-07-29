@@ -479,7 +479,7 @@ class InfluencerQAGenerator:
         
         print(f"QA 쌍 {len(qa_pairs)}개가 {filepath}에 저장되었습니다.")
     
-    def start_qa_generation(self, influencer_id: str, db: Session, user_id: str = None) -> str:
+    async def start_qa_generation(self, influencer_id: str, db: Session, user_id: str = None) -> str:
         """
         인플루언서를 위한 QA 생성 시작
         Args:
@@ -514,7 +514,7 @@ class InfluencerQAGenerator:
             # 인플루언서 데이터 가져오기 (사용자 권한 확인)
             if user_id:
                 # 사용자 권한으로 인플루언서 조회
-                influencer_data = get_influencer_by_id(db, user_id, influencer_id)
+                influencer_data = await get_influencer_by_id(db, user_id, influencer_id)
             else:
                 # 백그라운드 작업의 경우 직접 조회 (권한 우회)
                 from app.models.influencer import AIInfluencer
@@ -536,10 +536,52 @@ class InfluencerQAGenerator:
             
             # 저장된 시스템 프롬프트 가져오기
             system_prompt = getattr(influencer_data, 'system_prompt', None)
-            if system_prompt:
-                print(f"✅ 저장된 시스템 프롬프트 사용: {system_prompt[:100]}...")
+            
+            # 시스템 프롬프트가 없고 tone_data가 있으면 분석하여 생성
+            if not system_prompt:
+                # influencer_tone 필드에서 대사 데이터 가져오기
+                tone_data = getattr(influencer_data, 'influencer_tone', None)
+                if tone_data:
+                    print("🔍 tone_data 분석을 통한 시스템 프롬프트 생성 시작")
+                    try:
+                        # vLLM 클라이언트 생성
+                        from app.services.vllm_client import VLLMClient, VLLMServerConfig
+                        
+                        vllm_config = VLLMServerConfig(
+                            base_url=settings.VLLM_BASE_URL,
+                            timeout=getattr(settings, 'VLLM_TIMEOUT', 300)
+                        )
+                        
+                        # 캐릭터 정보 구성
+                        character_info = {
+                            "name": influencer_data.influencer_name,
+                            "age": getattr(influencer_data, 'influencer_age_group', '알 수 없음'),
+                            "personality": getattr(influencer_data, 'influencer_personality', '알 수 없음')
+                        }
+                        
+                        # tone_data 분석
+                        async with VLLMClient(vllm_config) as vllm_client:
+                            analysis_result = await vllm_client.analyze_tone_data(
+                                tone_data=tone_data,
+                                character_info=character_info
+                            )
+                        
+                        # 분석된 시스템 프롬프트 사용
+                        system_prompt = analysis_result.get("system_prompt", "")
+                        print(f"✅ 시스템 프롬프트 생성 완료: {system_prompt[:100]}...")
+                        
+                        # DB에 시스템 프롬프트 저장
+                        influencer_data.system_prompt = system_prompt
+                        db.commit()
+                        print("💾 생성된 시스템 프롬프트를 DB에 저장했습니다")
+                        
+                    except Exception as e:
+                        print(f"❌ tone_data 분석 실패: {e}")
+                        print("⚠️ 기본 프롬프트 사용")
+                else:
+                    print("⚠️ 저장된 시스템 프롬프트와 tone_data가 모두 없어 기본 프롬프트 사용")
             else:
-                print("⚠️ 저장된 시스템 프롬프트가 없어 기본 프롬프트 사용")
+                print(f"✅ 저장된 시스템 프롬프트 사용: {system_prompt[:100]}...")
             
             # 배치 요청 생성 (시스템 프롬프트 포함)
             batch_requests = self.create_qa_batch_requests(character, system_prompt=system_prompt)

@@ -291,6 +291,44 @@ class VLLMClient:
             logger.error(f"❌ 어댑터 언로드 실패: {model_id}, {e}")
             raise VLLMClientError(f"어댑터 언로드 실패: {e}")
 
+    async def analyze_tone_data(
+        self,
+        tone_data: str,
+        character_info: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """대사 데이터를 분석하여 시스템 프롬프트 생성
+        
+        Args:
+            tone_data: 분석할 대사 데이터
+            character_info: 캐릭터 정보 (이름, 나이, 성격 등)
+            
+        Returns:
+            Dict[str, Any]: 분석 결과 (system_prompt, tone_analysis 포함)
+        """
+        try:
+            # 새로운 대사 분석 엔드포인트 사용
+            payload = {
+                "tone_data": tone_data,
+                "character_info": character_info
+            }
+
+            logger.info("🔍 대사 분석 요청 시작 (OpenAI 기반)")
+            response = await self.client.post("/tone/analyze_tone", json=payload)
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            logger.info("✅ 대사 분석 완료")
+            return {
+                "system_prompt": result.get("system_prompt", ""),
+                "tone_analysis": result.get("tone_analysis", ""),
+                "original_tone_data": result.get("original_tone_data", tone_data)
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ 대사 분석 실패: {e}")
+            raise VLLMClientError(f"대사 분석 실패: {e}")
+
     async def start_finetuning(
         self,
         influencer_id: str,
