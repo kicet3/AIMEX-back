@@ -16,7 +16,7 @@ router = APIRouter()
 @router.get("/images", response_model=Dict[str, Any])
 async def get_gallery_images(
     page: int = Query(1, ge=1, description="페이지 번호"),
-    page_size: int = Query(10, ge=1, le=100, description="페이지당 항목 수"),
+    page_size: int = Query(12, ge=1, le=100, description="페이지당 항목 수"),
     team_id: Optional[int] = Query(None, description="팀 ID 필터"),
     db: AsyncSession = Depends(get_async_db),
     current_user: Dict = Depends(get_current_user)
