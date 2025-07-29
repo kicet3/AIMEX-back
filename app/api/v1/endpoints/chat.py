@@ -92,7 +92,7 @@ async def chatbot_chat(
                 system_message = (
                     str(influencer.system_prompt)
                     if influencer.system_prompt is not None
-                    else f"당신은 {influencer.influencer_name}입니다. 친근하고 도움이 되는 답변을 해주세요."
+                    else f"당신은 {influencer.influencer_name}입니다. 도움이 되는 답변을 해주세요."
                 )
 
                 # VLLM 서버에서 응답 생성
@@ -195,7 +195,7 @@ async def chatbot_chat_stream(
                 system_message = (
                     str(influencer.system_prompt)
                     if influencer.system_prompt is not None
-                    else f"당신은 {influencer.influencer_name}입니다. 친근하고 도움이 되는 답변을 해주세요."
+                    else f"당신은 {influencer.influencer_name}입니다. 도움이 되는 답변을 해주세요."
                 )
 
                 # VLLM 서버에서 스트리밍 응답 생성

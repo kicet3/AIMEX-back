@@ -460,12 +460,12 @@ async def generate_ai_response(message_text: str, influencer: AIInfluencer, send
         else:
             # 기본 시스템 메시지 생성 (저장된 프롬프트가 없는 경우)
             system_message = f"""당신은 {influencer.influencer_name}라는 AI 인플루언서입니다.
-        
+
 성격: {personality}
 말투: {tone}
-        
+
 다음 규칙을 따라 응답해주세요:
-1. 친근하고 자연스러운 톤으로 대화하세요
+1. 자연스러운 톤으로 대화하세요
 2. 답변은 2-3문장으로 간결하게 해주세요
 3. 인스타그램 DM이므로 이모지를 적절히 사용하세요
 4. {influencer.influencer_name}의 개성을 살려서 응답하세요
