@@ -18,6 +18,27 @@ class BoardBase(BaseModel):
     image_url: Optional[str] = None
 
 
+# 게시글 목록용 간소화된 스키마 (성능 최적화)
+class BoardList(BaseModel):
+    board_id: str
+    influencer_id: str
+    board_topic: str
+    board_description: Optional[str] = None
+    board_platform: int
+    board_hash_tag: Optional[str] = None
+    board_status: int
+    # image_url 필드 제거 - 목록에서는 이미지 사용하지 않음
+    reservation_at: Optional[datetime] = None
+    published_at: Optional[datetime] = None
+    platform_post_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    # 목록에서 필요한 최소한의 인플루언서 정보
+    influencer_name: Optional[str] = None
+    # 목록에서 필요한 최소한의 통계 정보
+    instagram_stats: Optional[dict] = None
+
+
 class BoardCreate(BaseModel):
     influencer_id: str
     team_id: int
@@ -53,6 +74,7 @@ class Board(BoardBase, TimestampSchema):
 
 class BoardWithInfluencer(Board):
     influencer_name: Optional[str] = None
+    influencer_description: Optional[str] = None
     # 인스타그램 관련 필드 추가 (Board에서 상속됨)
 
 
@@ -115,7 +137,6 @@ class BoardWithAIContent(Board):
     generation_metadata: Optional[dict] = None
 
 
-# 간단한 콘텐츠 생성 요청 (프론트엔드용)
 class SimpleContentRequest(BaseModel):
     """간단한 콘텐츠 생성 요청 (프론트엔드에서 사용)"""
 

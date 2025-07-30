@@ -167,6 +167,7 @@ class BatchKey(BatchKeyBase):
 class ChatMessageBase(BaseModel):
     influencer_id: str
     message_content: str
+    message_type: str = "user"  # user 또는 ai
     end_at: datetime
 
 
@@ -175,7 +176,8 @@ class ChatMessageCreate(ChatMessageBase):
 
 
 class ChatMessage(ChatMessageBase):
-    session_id: int
+    chat_message_id: str
+    session_id: str
     created_at: datetime
 
 

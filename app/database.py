@@ -95,10 +95,10 @@ def init_database():
             StylePreset,
             AIInfluencer,
             BatchKey,
-            ChatMessage,
             InfluencerAPI,
             APICallAggregation,
         )
+        from app.models.chat_message import ChatMessage
         from app.models.board import Board
         from app.models.image_generation import ImageGenerationRequest
         from app.models.content_enhancement import ContentEnhancement

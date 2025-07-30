@@ -275,31 +275,6 @@ class BatchKey(Base):
     influencer = relationship("AIInfluencer", back_populates="batch_keys")
 
 
-class ChatMessage(Base):
-    """채팅 메시지 모델"""
-
-    __tablename__ = "CHAT_MESSAGE"
-
-    session_id = Column(
-        Integer, primary_key=True, autoincrement=True, comment="대화 세션 고유 식별자"
-    )
-    influencer_id = Column(
-        String(255),
-        ForeignKey("AI_INFLUENCER.influencer_id"),
-        nullable=False,
-        default=lambda: str(uuid.uuid4()),
-        comment="인플루언서 고유 식별자",
-    )
-    message_content = Column(
-        Text, nullable=False, comment="총 대화 내용, JSON 형식으로 저장"
-    )
-    created_at = Column(TIMESTAMP, nullable=False, comment="대화 시작 시각")
-    end_at = Column(TIMESTAMP, nullable=False, comment="대화 종료 시각")
-
-    # 관계
-    influencer = relationship("AIInfluencer", back_populates="chat_messages")
-
-
 class InfluencerAPI(Base, TimestampMixin):
     """인플루언서 API 모델"""
 

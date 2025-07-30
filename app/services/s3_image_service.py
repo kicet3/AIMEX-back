@@ -7,6 +7,8 @@ from pathlib import Path
 import uuid
 from fastapi import HTTPException, status
 from app.core.config import settings
+from botocore.exceptions import ClientError
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,8 @@ class S3ImageService:
         self.s3_client = None
         self.bucket_name = settings.S3_BUCKET_NAME
         self.region = settings.AWS_REGION
+        self._url_cache: Dict[str, Dict] = {}  # URL 캐시 추가
+        self._cache_ttl = 3600  # 캐시 TTL (1시간)
 
         # S3 클라이언트 초기화
         self._initialize_client()
@@ -328,8 +332,20 @@ class S3ImageService:
             return False
 
     def generate_presigned_url(self, s3_key: str, expiration: int = 3600) -> str:
-        """Presigned URL 생성 (기본 1시간 유효)"""
+        """Presigned URL 생성 (캐싱 포함)"""
         logger.info(f"Presigned URL 생성 시도: {s3_key}")
+        
+        # 캐시된 URL이 있고 아직 유효한지 확인
+        if s3_key in self._url_cache:
+            cached_data = self._url_cache[s3_key]
+            if time.time() < cached_data['expires_at']:
+                logger.info(f"Using cached presigned URL for key: {s3_key}")
+                return cached_data['url']
+            else:
+                # 만료된 캐시 제거
+                del self._url_cache[s3_key]
+                logger.info(f"Removed expired cache for key: {s3_key}")
+        
         logger.info(f"S3 서비스 사용 가능: {self.is_available()}")
         logger.info(f"S3 클라이언트 존재: {self.s3_client is not None}")
         logger.info(f"버킷명: {self.bucket_name}")
@@ -345,7 +361,14 @@ class S3ImageService:
                 Params={"Bucket": self.bucket_name, "Key": s3_key},
                 ExpiresIn=expiration,
             )
-            logger.info(f"Presigned URL 생성 성공: {s3_key}")
+            
+            # 캐시에 저장 (만료 시간을 현재 시간 + expiration으로 설정)
+            self._url_cache[s3_key] = {
+                'url': url,
+                'expires_at': time.time() + expiration - 300  # 5분 여유 시간
+            }
+            
+            logger.info(f"Presigned URL 생성 성공 및 캐시 저장: {s3_key}")
             logger.info(f"생성된 URL: {url}")
             return url
         except Exception as e:
@@ -451,11 +474,25 @@ class S3ImageService:
             logger.error(f"게시글 이미지 삭제 실패: {board_id} - {e}")
             return False
 
+    def clear_cache(self):
+        """캐시 정리"""
+        self._url_cache.clear()
+        logger.info("S3 URL cache cleared")
+
+    def get_cache_stats(self) -> Dict:
+        """캐시 통계 반환"""
+        return {
+            'cache_size': len(self._url_cache),
+            'cached_keys': list(self._url_cache.keys())
+        }
+
 
 # 싱글톤 인스턴스
-s3_image_service = S3ImageService()
-
+_s3_image_service = None
 
 def get_s3_image_service() -> S3ImageService:
     """S3 이미지 서비스 인스턴스 반환"""
-    return s3_image_service
+    global _s3_image_service
+    if _s3_image_service is None:
+        _s3_image_service = S3ImageService()
+    return _s3_image_service

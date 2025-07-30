@@ -191,6 +191,21 @@ class MCPToolProcessor:
                     if isinstance(tool, dict):
                         name = tool.get("name", "Unknown")
                         description = tool.get("description", "No description")
+                        # 매개변수 정보 추출
+                        args_schema = tool.get("args_schema", {})
+                        required_params = args_schema.get("required", [])
+                        properties = args_schema.get("properties", {})
+                        
+                        # 매개변수 정보 문자열 생성
+                        params_info = []
+                        for param_name, param_info in properties.items():
+                            param_type = param_info.get("type", "string")
+                            param_desc = param_info.get("description", "")
+                            required = "필수" if param_name in required_params else "선택"
+                            params_info.append(f"  - {param_name} ({param_type}): {param_desc} [{required}]")
+                        
+                        params_str = "\n".join(params_info) if params_info else "  - 매개변수 없음"
+                        
                     else:
                         # 객체 형태인 경우 - 다양한 속성 시도
                         name = None
@@ -213,11 +228,28 @@ class MCPToolProcessor:
                             name = str(tool.__class__.__name__)
                         if description is None:
                             description = "No description"
+                        
+                        # 매개변수 정보 추출 (객체의 경우)
+                        params_str = "  - 매개변수 정보 없음"
+                        if hasattr(tool, 'args_schema'):
+                            args_schema = tool.args_schema
+                            if isinstance(args_schema, dict):
+                                required_params = args_schema.get("required", [])
+                                properties = args_schema.get("properties", {})
+                                
+                                params_info = []
+                                for param_name, param_info in properties.items():
+                                    param_type = param_info.get("type", "string")
+                                    param_desc = param_info.get("description", "")
+                                    required = "필수" if param_name in required_params else "선택"
+                                    params_info.append(f"  - {param_name} ({param_type}): {param_desc} [{required}]")
+                                
+                                params_str = "\n".join(params_info) if params_info else "  - 매개변수 없음"
 
-                    tools_description_parts.append(f"- {name}: {description}")
+                    tools_description_parts.append(f"- {name}: {description}\n매개변수:\n{params_str}")
                 except Exception as e:
                     logger.warning(f"도구 정보 파싱 실패: {e}, 도구: {tool}")
-                    tools_description_parts.append(f"- Unknown: No description")
+                    tools_description_parts.append(f"- Unknown: No description\n매개변수:\n  - 매개변수 정보 없음")
 
             tools_description = "\n".join(tools_description_parts)
             logger.info(f"📋 사용 가능한 도구 목록:\n{tools_description}")
@@ -237,15 +269,13 @@ class MCPToolProcessor:
 주의사항:
 - 도구명은 정확히 위에 나열된 도구명 중 하나를 사용해야 합니다
 - 사용 가능한 도구 목록에서 정확한 이름을 선택하세요
-- 사용자의 질문에 '날씨', '기온', '미세먼지', '자외선', '강수', '비', '눈', '기상', '온도' 등 날씨 관련 단어와 '오늘', '내일', '주간', '이번 주' 등 시간 표현이 함께 포함된 경우에만 weather 관련 도구(get_current_weather, get_weather_forecast 등)를 사용하세요.
-- 그렇지 않으면(날씨 관련 단어가 없으면) 반드시 web_search_exa 도구를 사용하세요.
-- 수학 계산(덧셈, 뺄셈, 곱셈, 나눗셈, 제곱, 제곱근, 팩토리얼 등)은 반드시 math 관련 도구(add, subtract, multiply, divide, power, sqrt, factorial 등)를 사용하세요.
-- "위키", "위키피디아", "wikipedia"라는 단어가 명확히 포함된 경우에만 wikipedia_search_exa를 사용하세요.
-- 그 외의 정보성 질문(뉴스, 인물, 상식, 일반 지식 등)은 반드시 web_search_exa 도구를 사용하세요.
+- 매개변수 이름은 반드시 위에 나열된 매개변수 이름과 정확히 일치해야 합니다
+- 수학 계산(덧셈, 뺄셈, 곱셈, 나눗셈, 제곱, 제곱근, 팩토리얼 등)은 반드시 math 관련 도구(add, subtract, multiply, divide, power, sqrt, factorial 등)를 사용하세요
+- "위키", "위키피디아", "wikipedia"라는 단어가 명확히 포함된 경우에만 wikipedia_search_exa를 사용하세요
+- 그 외의 정보성 질문(뉴스, 인물, 상식, 일반 지식 등)은 반드시 web_search_exa 도구를 사용하세요
 - location 매개변수는 실제 도시명(서울, 부산, 대구 등)만 사용하세요
 - 예시나 설명 텍스트는 포함하지 마세요
 
-만약 위의 도구들로 처리할 수 없는 질문이라면 "웹검색 필요"라고 답변하세요.
 기존 도구로 처리할 수 있다면 해당 도구를 선택하세요."""
 
             logger.info("🧠 OpenAI를 사용한 도구 사용 의도 분석 시작...")
@@ -330,33 +360,24 @@ class MCPToolProcessor:
                         return None
 
                     tool_type = get_tool_type(tool_name, all_tools)
-                    if tool_type == "numeric":
-                        parse_prompt = (
-                            "아래 도구 결과의 모든 정보(수치, 상태 등)를 빠짐없이, 변형/누락 없이 명확하게 전달하세요. "
-                            "불필요한 사설, 감탄, 이모지, 인사말, 추천, 조언 등은 절대 포함하지 마세요.\n"
-                            f"\n도구 결과:\n{result}"
-                        )
-                    elif tool_type == "search":
-                        parse_prompt = (
-                            "아래 검색 결과의 모든 항목을 빠짐없이, 불필요한 URL, 특수문자, 메타데이터만 제거하고 명확하게 전달하세요. "
-                            "요약하지 말고, 모든 항목을 포함하세요. 사설, 감탄, 이모지, 인사말, 추천, 조언 등은 절대 포함하지 마세요.\n"
-                            f"\n도구 결과:\n{result}"
-                        )
-                    elif tool_type == "text":
-                        parse_prompt = (
-                            "아래 결과의 모든 정보(주요 내용 등)를 빠짐없이, 변형/누락 없이 명확하게 전달하세요. "
-                            "불필요한 사설, 감탄, 이모지, 인사말, 추천, 조언 등은 절대 포함하지 마세요.\n"
-                            f"\n도구 결과:\n{result}"
-                        )
-                    else:
-                        parse_prompt = (
-                            "아래 도구 결과의 모든 정보(수치, 상태, 주요 내용 등)를 빠짐없이, 변형/누락 없이 명확하게 전달하세요. "
-                            "불필요한 사설, 감탄, 이모지, 인사말, 추천, 조언 등은 절대 포함하지 마세요.\n"
-                            f"\n도구 결과:\n{result}"
-                        )
+                    
+                    # 모든 MCP 도구에 대해 범용적인 파싱 적용
+                    parse_prompt = (
+                        "아래 도구 결과에서 순수한 결과 값만 추출해주세요. "
+                        "다음 사항을 제외하고 핵심 데이터만 전달하세요:\n"
+                        "- 요청 ID, 검색 시간, 비용 등 기술적 정보\n"
+                        "- 자동 프롬프트 문자열, 해결된 검색 유형 등 내부 정보\n"
+                        "- 발행일, 저자 등 메타데이터\n"
+                        "- URL 링크\n"
+                        "- 특수문자나 마크다운 형식\n"
+                        "- 도구 실행 관련 내부 로그나 디버그 정보\n"
+                        "중요: 결과 값 자체만 전달하세요. 추가 설명, 요약, 해석은 포함하지 마세요.\n"
+                        f"\n도구 결과:\n{result}"
+                    )
+                    
                     parsed_result = await self.openai_service.openai_tool_selection(
                         user_prompt=parse_prompt,
-                        system_prompt="당신은 정보를 명확하고 정확하게, 가장 적합한 형태로만 전달하는 AI입니다. 불필요한 말은 절대 포함하지 마세요.",
+                        system_prompt="당신은 도구 결과에서 순수한 데이터만 추출하는 AI입니다. 추가 설명이나 해석 없이 결과 값 자체만 반환하세요.",
                     )
                     logger.info(f"📝 파싱된 도구 결과: {parsed_result}")
                     tool_results.append(parsed_result)

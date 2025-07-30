@@ -386,29 +386,13 @@ async def get_influencers(
 
     influencers = await get_influencers_list(db, user_id, skip, limit)
 
-    # 각 인플루언서의 이미지 URL을 S3 presigned URL로 변환
+    # 목록에서는 이미지 URL 처리를 제거하여 성능 최적화
+    # 프로필 이미지가 필요한 경우 별도 API를 통해 조회
     for influencer in influencers:
         if influencer.image_url:
-            if not influencer.image_url.startswith("http"):
-                # S3 키인 경우 presigned URL 생성
-                try:
-                    from app.services.s3_image_service import get_s3_image_service
-
-                    s3_service = get_s3_image_service()
-                    if s3_service.is_available():
-                        # presigned URL 생성 (1시간 유효)
-                        influencer.image_url = s3_service.generate_presigned_url(
-                            influencer.image_url, expiration=3600
-                        )
-                    else:
-                        # S3 서비스가 사용 불가능한 경우 직접 URL 생성
-                        influencer.image_url = f"https://aimex-influencers.s3.ap-northeast-2.amazonaws.com/{influencer.image_url}"
-                except Exception as e:
-                    logger.error(
-                        f"Failed to generate presigned URL for influencer {influencer.influencer_id}: {e}"
-                    )
-                    # 실패 시 직접 URL 생성
-                    influencer.image_url = f"https://aimex-influencers.s3.ap-northeast-2.amazonaws.com/{influencer.image_url}"
+            # 목록에서는 원본 S3 키만 유지 (Presigned URL 생성하지 않음)
+            # 프로필 이미지가 필요한 경우 get_influencer API 사용
+            pass
 
     return influencers
 

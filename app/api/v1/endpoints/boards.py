@@ -25,6 +25,7 @@ from app.schemas.board import (
     BoardUpdate,
     Board as BoardSchema,
     BoardWithInfluencer,
+    BoardList,
 )
 from app.services.content_enhancement_service import ContentEnhancementService
 from app.core.security import get_current_user
@@ -49,7 +50,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-@router.get("", response_model=List[BoardSchema])
+@router.get("", response_model=List[BoardList])
 async def get_boards(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=100),
@@ -57,7 +58,7 @@ async def get_boards(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """로그인된 사용자가 소속된 그룹이 사용한 인플루언서가 작성한 게시글만 조회"""
+    """로그인된 사용자가 소속된 그룹이 사용한 인플루언서가 작성한 게시글만 조회 (최적화된 목록용)"""
     try:
         user_id = current_user.get("sub")
         if not user_id:
@@ -98,172 +99,125 @@ async def get_boards(
             logger.error(f"Failed to get influencers: {str(e)}")
             return []
 
-        # 4. 게시글 조회
+        # 4. 게시글 조회 (JOIN으로 인플루언서 정보도 함께 가져오기)
         try:
-            query = db.query(Board).filter(Board.influencer_id.in_(influencer_ids))
+            # JOIN을 사용하여 인플루언서 정보를 한번에 가져오기
+            # 필요한 컬럼만 선택하여 메모리 사용량 최적화
+            query = (
+                db.query(
+                    Board.board_id,
+                    Board.influencer_id,
+                    Board.board_topic,
+                    Board.board_description,
+                    Board.board_platform,
+                    Board.board_hash_tag,
+                    Board.board_status,
+                    # Board.image_url 제거 - 목록에서는 이미지 사용하지 않음
+                    Board.reservation_at,
+                    Board.published_at,
+                    Board.platform_post_id,
+                    Board.created_at,
+                    Board.updated_at,
+                    AIInfluencer.influencer_name,
+                    AIInfluencer.influencer_description,
+                    AIInfluencer.image_url,  # 인플루언서 프로필 이미지 추가
+                    AIInfluencer.instagram_connected_at,
+                    AIInfluencer.instagram_id,
+                    AIInfluencer.instagram_access_token
+                )
+                .join(AIInfluencer, Board.influencer_id == AIInfluencer.influencer_id)
+                .filter(Board.influencer_id.in_(influencer_ids))
+            )
 
             # influencer_id 필터링 적용
             if influencer_id is not None:
                 query = query.filter(Board.influencer_id == influencer_id)
 
-            boards = (
+            # 인덱스를 활용한 정렬 (created_at 기준)
+            results = (
                 query.order_by(Board.created_at.desc()).offset(skip).limit(limit).all()
             )
         except Exception as e:
             logger.error(f"Failed to get boards: {str(e)}")
             return []
 
-        # 5. 인스타그램 통계 정보 추가 (배치 처리로 개선)
-        from app.services.instagram_posting_service import InstagramPostingService
-
-        instagram_service = InstagramPostingService()
-
-        # 인플루언서 정보를 미리 조회하여 캐시
-        influencer_cache = {inf.influencer_id: inf for inf in influencers}
-
-        logger.info(f"인플루언서 캐시: {list(influencer_cache.keys())}")
-        logger.info(f"게시글 수: {len(boards)}")
-
-        enhanced_boards = []
-        for board in boards:
-            # 인플루언서 정보 조회
-            influencer = influencer_cache.get(board.influencer_id)
-
-            logger.info(
-                f"게시글 {board.board_id}의 인플루언서 ID: {board.influencer_id}"
-            )
-            logger.info(
-                f"인플루언서 정보: {influencer.influencer_name if influencer else 'None'}"
-            )
-
-            # 이미지 URL을 S3 presigned URL로 변환
-            image_url = board.image_url
-            if image_url:
-                # 쉼표로 구분된 다중 이미지 처리
-                image_urls = image_url.split(",") if "," in image_url else [image_url]
-                processed_image_urls = []
-
-                for single_image_url in image_urls:
-                    single_image_url = single_image_url.strip()
-                    if not single_image_url.startswith("http"):
-                        # S3 키인 경우 presigned URL 생성
-                        try:
-                            from app.services.s3_image_service import (
-                                get_s3_image_service,
-                            )
-
-                            s3_service = get_s3_image_service()
-                            if s3_service.is_available():
-                                # presigned URL 생성 (1시간 유효)
-                                processed_url = s3_service.generate_presigned_url(
-                                    single_image_url, expiration=3600
-                                )
-                            else:
-                                # S3 서비스가 사용 불가능한 경우 직접 URL 생성
-                                processed_url = f"https://aimex-influencers.s3.ap-northeast-2.amazonaws.com/{single_image_url}"
-                        except Exception as e:
-                            logger.error(
-                                f"Failed to generate presigned URL for board {board.board_id}: {e}"
-                            )
-                            # 실패 시 직접 URL 생성
-                            processed_url = f"https://aimex-influencers.s3.ap-northeast-2.amazonaws.com/{single_image_url}"
-                    else:
-                        processed_url = single_image_url
-
-                    processed_image_urls.append(processed_url)
-
-                # 처리된 이미지 URL들을 쉼표로 구분하여 저장
-                image_url = ",".join(processed_image_urls)
-
-            board_dict = {
-                "board_id": board.board_id,
-                "influencer_id": board.influencer_id,
-                "user_id": board.user_id,
-                "team_id": board.team_id,
-                "group_id": board.group_id,
-                "board_topic": board.board_topic,
-                "board_description": board.board_description,
-                "board_platform": board.board_platform,
-                "board_hash_tag": board.board_hash_tag,
-                "board_status": board.board_status,
-                "image_url": image_url,
-                "reservation_at": board.reservation_at,
-                "published_at": board.published_at,
-                "platform_post_id": board.platform_post_id,
-                "created_at": board.created_at,
-                "updated_at": board.updated_at,
-                # 인플루언서 정보 추가
-                "influencer_name": influencer.influencer_name if influencer else None,
-                "influencer_description": (
-                    influencer.influencer_description if influencer else None
-                ),
-                # 기본 통계 초기화 (실제 사용 가능한 필드만)
-                "instagram_stats": {"like_count": 0, "comments_count": 0},
-            }
-
-            # 인스타그램 게시글이고 발행된 상태이며 platform_post_id가 있는 경우 통계 가져오기
+        # 5. 목록용 간소화된 데이터 구성
+        board_list = []
+        for result in results:
+            # 튜플 형태의 결과를 언패킹
+            (board_id, influencer_id, board_topic, board_description, 
+             board_platform, board_hash_tag, board_status, reservation_at,
+             published_at, platform_post_id, created_at, updated_at,
+             influencer_name, influencer_description, influencer_image_url, instagram_connected_at,
+             instagram_id, instagram_access_token) = result
+            
+            # 목록용 최소한의 통계 정보만 포함
+            instagram_stats = {"like_count": 0, "comments_count": 0}
+            
+            # 발행된 인스타그램 게시글의 경우 기본 통계만 가져오기
             if (
-                board.board_platform == 0
-                and board.board_status == 3
-                and board.platform_post_id
-                and board.influencer_id
+                board_platform == 0
+                and board_status == 3
+                and platform_post_id
             ):
-
                 try:
-                    # 캐시된 인플루언서 정보 사용
-                    influencer = influencer_cache.get(board.influencer_id)
-
+                    # 인플루언서 정보 확인
+                    influencer = next((inf for inf in influencers if inf.influencer_id == influencer_id), None)
+                    
                     if (
                         influencer
                         and influencer.instagram_is_active
                         and influencer.instagram_access_token
                         and influencer.instagram_id
                     ):
-
-                        # 인스타그램 게시글 정보 가져오기
+                        # 인스타그램 게시글 정보 가져오기 (목록에서는 기본 통계만)
+                        instagram_service = InstagramPostingService()
                         post_info = await instagram_service.get_instagram_post_info(
-                            board.platform_post_id,
+                            platform_post_id,
                             str(influencer.instagram_access_token),
                             str(influencer.instagram_id),
                         )
 
                         if post_info:
-                            board_dict["instagram_stats"].update(
-                                {
-                                    "like_count": post_info.get("like_count", 0),
-                                    "comments_count": post_info.get(
-                                        "comments_count", 0
-                                    ),
-                                    "shares_count": post_info.get("shares_count", 0),
-                                    "views_count": post_info.get("views_count", 0),
-                                }
-                            )
-
-                            # Instagram 링크를 API에서 받아온 permalink로 설정
-                            if post_info.get("permalink"):
-                                board_dict["instagram_link"] = post_info.get(
-                                    "permalink"
-                                )
-                            else:
-                                # permalink가 없는 경우 동적 생성
-                                board_dict["instagram_link"] = (
-                                    f"https://www.instagram.com/p/{board.platform_post_id}/"
-                                )
-
-                        # insights API 호출 제거 - 기본 게시물 정보만 사용
+                            instagram_stats.update({
+                                "like_count": post_info.get("like_count", 0),
+                                "comments_count": post_info.get("comments_count", 0),
+                            })
 
                 except Exception as e:
                     logger.error(
-                        f"Failed to fetch Instagram stats for board {board.board_id}: {str(e)}"
-                    )
-                    # 통계 가져오기 실패 시 기본값 유지
-                    board_dict["instagram_link"] = (
-                        f"https://www.instagram.com/p/{board.platform_post_id}/"
+                        f"Failed to fetch Instagram stats for board {board_id}: {str(e)}"
                     )
 
-            enhanced_boards.append(board_dict)
+            board_dict = {
+                "board_id": board_id,
+                "influencer_id": influencer_id,
+                "board_topic": board_topic,
+                "board_description": board_description,
+                "board_platform": board_platform,
+                "board_hash_tag": board_hash_tag,
+                "board_status": board_status,
+                # image_url 필드 제거 - 목록에서는 이미지 사용하지 않음
+                "reservation_at": reservation_at,
+                "published_at": published_at,
+                "platform_post_id": platform_post_id,
+                "created_at": created_at,
+                "updated_at": updated_at,
+                # 목록에서 필요한 최소한의 인플루언서 정보
+                "influencer_name": influencer_name,
+                "influencer_description": influencer_description,
+                "influencer_image_url": influencer_image_url, # 인플루언서 프로필 이미지 추가
+                # 인스타그램 연결 정보 (N+1 문제 해결을 위해 미리 포함)
+                "instagram_connected_at": instagram_connected_at,
+                "instagram_id": instagram_id,
+                "instagram_access_token": instagram_access_token,
+                # 목록에서 필요한 최소한의 통계 정보
+                "instagram_stats": instagram_stats,
+            }
 
-        return enhanced_boards
+            board_list.append(board_dict)
+
+        return board_list
 
     except HTTPException:
         raise
@@ -281,7 +235,7 @@ async def get_board(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """특정 게시글 조회"""
+    """특정 게시글 조회 (상세 정보 포함)"""
     try:
         user_id = current_user.get("sub")
         if not user_id:
@@ -290,16 +244,56 @@ async def get_board(
                 detail="User authentication required",
             )
 
-        board = (
-            db.query(Board)
-            .filter(Board.board_id == board_id, Board.user_id == user_id)
-            .first()
-        )
+        # 1. 사용자 존재 확인
+        user = db.query(User).filter(User.user_id == user_id).first()
+        if not user:
+            logger.warning(f"User not found: {user_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+            )
+
+        # 2. 사용자 팀 정보 안전하게 조회
+        try:
+            group_ids = [team.group_id for team in user.teams] if user.teams else []
+        except Exception as e:
+            logger.error(f"Failed to get user teams: {str(e)}")
+            group_ids = []
+
+        # 3. 해당 그룹의 인플루언서 조회
+        try:
+            influencers = (
+                db.query(AIInfluencer)
+                .filter(AIInfluencer.group_id.in_(group_ids))
+                .all()
+            )
+            influencer_ids = [inf.influencer_id for inf in influencers]
+        except Exception as e:
+            logger.error(f"Failed to get influencers: {str(e)}")
+            influencer_ids = []
+
+        # 4. 게시글 조회 (권한 체크 포함)
+        query = db.query(Board).filter(Board.board_id == board_id)
+        
+        # 권한 체크: 사용자가 직접 생성한 게시글이거나 사용자가 속한 그룹의 인플루언서가 작성한 게시글
+        if group_ids:
+            query = query.filter(
+                (Board.user_id == user_id) | (Board.influencer_id.in_(influencer_ids))
+            )
+            logger.info(f"게시글 조회 - 사용자: {user_id}, 그룹: {group_ids}, 인플루언서: {influencer_ids}")
+        else:
+            # 그룹이 없는 경우 사용자가 직접 생성한 게시글만
+            query = query.filter(Board.user_id == user_id)
+            logger.info(f"게시글 조회 - 사용자: {user_id}, 그룹 없음")
+
+        board = query.first()
 
         if board is None:
+            logger.warning(f"게시글을 찾을 수 없음 - board_id: {board_id}, user_id: {user_id}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Board not found"
             )
+
+        logger.info(f"게시글 조회 성공 - board_id: {board_id}, influencer_id: {board.influencer_id}")
 
         # 인플루언서 정보 조회
         influencer = (
@@ -308,11 +302,10 @@ async def get_board(
             .first()
         )
 
-        # Instagram 링크는 동적으로 생성 (데이터베이스에 저장하지 않음)
-        # 이미지 URL을 S3 presigned URL로 변환
-        image_url = board.image_url
-        if image_url:
-            if not image_url.startswith("http"):
+        # 인플루언서 프로필 이미지 URL 처리
+        influencer_image_url = None
+        if influencer and influencer.image_url:
+            if not influencer.image_url.startswith("http"):
                 # S3 키인 경우 presigned URL 생성
                 try:
                     from app.services.s3_image_service import get_s3_image_service
@@ -320,21 +313,58 @@ async def get_board(
                     s3_service = get_s3_image_service()
                     if s3_service.is_available():
                         # presigned URL 생성 (1시간 유효)
-                        image_url = s3_service.generate_presigned_url(
-                            image_url, expiration=3600
+                        influencer_image_url = s3_service.generate_presigned_url(
+                            influencer.image_url, expiration=3600
                         )
-                        logger.info(f"Generated presigned URL for image: {image_url}")
                     else:
                         # S3 서비스가 사용 불가능한 경우 직접 URL 생성
-                        image_url = f"https://aimex-influencers.s3.ap-northeast-2.amazonaws.com/{image_url}"
-                        logger.warning("S3 service unavailable, using direct URL")
+                        influencer_image_url = f"https://aimex-influencers.s3.ap-northeast-2.amazonaws.com/{influencer.image_url}"
                 except Exception as e:
-                    logger.error(f"Failed to generate presigned URL: {e}")
-                    # 실패 시 직접 URL 생성
-                    image_url = f"https://aimex-influencers.s3.ap-northeast-2.amazonaws.com/{image_url}"
+                    logger.error(f"Failed to generate presigned URL for influencer image: {e}")
+                    influencer_image_url = f"https://aimex-influencers.s3.ap-northeast-2.amazonaws.com/{influencer.image_url}"
             else:
                 # 이미 HTTP URL인 경우 그대로 사용
-                logger.info(f"Using existing HTTP URL: {image_url}")
+                influencer_image_url = influencer.image_url
+
+        # Instagram 링크는 동적으로 생성 (데이터베이스에 저장하지 않음)
+        # 이미지 URL을 S3 presigned URL로 변환 (상세보기에서는 전체 이미지)
+        image_url = board.image_url
+        if image_url:
+            # 쉼표로 구분된 다중 이미지 처리
+            image_urls = image_url.split(",") if "," in image_url else [image_url]
+            processed_image_urls = []
+
+            for single_image_url in image_urls:
+                single_image_url = single_image_url.strip()
+                if not single_image_url.startswith("http"):
+                    # S3 키인 경우 presigned URL 생성
+                    try:
+                        from app.services.s3_image_service import get_s3_image_service
+
+                        s3_service = get_s3_image_service()
+                        if s3_service.is_available():
+                            # 상세보기에서는 전체 이미지용 presigned URL 생성 (1시간 유효)
+                            processed_url = s3_service.generate_presigned_url(
+                                single_image_url, expiration=3600
+                            )
+                            logger.info(f"Generated presigned URL for image: {processed_url}")
+                        else:
+                            # S3 서비스가 사용 불가능한 경우 직접 URL 생성
+                            processed_url = f"https://aimex-influencers.s3.ap-northeast-2.amazonaws.com/{single_image_url}"
+                            logger.warning("S3 service unavailable, using direct URL")
+                    except Exception as e:
+                        logger.error(f"Failed to generate presigned URL: {e}")
+                        # 실패 시 직접 URL 생성
+                        processed_url = f"https://aimex-influencers.s3.ap-northeast-2.amazonaws.com/{single_image_url}"
+                else:
+                    # 이미 HTTP URL인 경우 그대로 사용
+                    processed_url = single_image_url
+                    logger.info(f"Using existing HTTP URL: {processed_url}")
+
+                processed_image_urls.append(processed_url)
+
+            # 상세보기에서는 모든 이미지를 쉼표로 구분하여 반환
+            image_url = ",".join(processed_image_urls)
         else:
             logger.info("No image URL found")
 
@@ -356,6 +386,8 @@ async def get_board(
             "created_at": board.created_at,
             "updated_at": board.updated_at,
             "influencer_name": influencer.influencer_name if influencer else None,
+            "influencer_description": influencer.influencer_description if influencer else None,
+            "influencer_image_url": influencer_image_url, # 인플루언서 프로필 이미지 추가
             # 기본 통계 초기화
             "instagram_stats": {
                 "like_count": 0,

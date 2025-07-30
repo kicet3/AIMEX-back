@@ -82,6 +82,7 @@ class MCPClientService:
 
             try:
                 from app.services.mcp_server_manager import mcp_server_manager
+                from app.services.mcp_server_manager import get_command_path, normalize_path
 
                 # MCP 서버들이 실행될 때까지 대기
                 logger.info("🔄 MCP 서버들이 실행될 때까지 대기 중...")
@@ -101,27 +102,45 @@ class MCPClientService:
 
                         if "command" in config and "args" in config:
                             # 명령어 실행 방식 서버 (Exa Search 등) - stdio 통신
+                            # OS별 명령어 경로 처리
+                            command = get_command_path(config["command"])
+                            args = config["args"]
+                            
+                            # args의 경로도 정규화
+                            normalized_args = []
+                            for arg in args:
+                                if isinstance(arg, str) and ("/" in arg or "\\" in arg):
+                                    normalized_args.append(normalize_path(arg))
+                                else:
+                                    normalized_args.append(arg)
+                            
                             client_config[server_name] = {
-                                "command": config["command"],
-                                "args": config["args"],
+                                "command": command,
+                                "args": normalized_args,
                                 "transport": "stdio",
                             }
                             logger.info(f"✅ MCP 서버 '{server_name}' stdio 설정 완료")
+                            logger.info(f"  - 명령어: {command}")
+                            logger.info(f"  - 인수: {normalized_args}")
 
                         elif "url" in config:
                             # SSE 기반 서버 - streamable_http 통신
+                            # URL 정규화
+                            url = normalize_path(config["url"]) if "/" in config["url"] else config["url"]
                             client_config[server_name] = {
-                                "url": config["url"],
+                                "url": url,
                                 "transport": "streamable_http",
                             }
                             logger.info(
                                 f"✅ MCP 서버 '{server_name}' streamable_http 설정 완료"
                             )
+                            logger.info(f"  - URL: {url}")
 
                         elif "script" in config and "port" in config:
                             # 로컬 스크립트 서버 (SSE 기반) - streamable_http 통신
                             # FastMCP는 /mcp/ 엔드포인트를 사용
-                            server_url = f"http://localhost:{config['port']}/mcp/"
+                            # localhost 대신 127.0.0.1 사용 (일부 환경에서 더 안정적)
+                            server_url = f"http://127.0.0.1:{config['port']}/mcp/"
                             client_config[server_name] = {
                                 "url": server_url,
                                 "transport": "streamable_http",

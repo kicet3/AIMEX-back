@@ -6,14 +6,15 @@ from typing import List
 from datetime import datetime
 import logging
 import json
+import uuid
 from pydantic import BaseModel
 from app.database import get_db
 from app.models.influencer import (
-    ChatMessage,
     AIInfluencer,
     InfluencerAPI,
     APICallAggregation,
 )
+from app.models.chat_message import ChatMessage
 from app.models.user import User
 from app.core.security import get_current_user
 from app.utils.timezone_utils import get_current_kst
@@ -45,7 +46,7 @@ class ChatbotResponse(BaseModel):
 
 # 채팅 메시지 스키마
 class ChatMessageSchema(BaseModel):
-    session_id: int
+    session_id: str
     influencer_id: str
     message_content: str
     created_at: str
@@ -58,6 +59,7 @@ class ChatMessageSchema(BaseModel):
 class ChatMessageCreate(BaseModel):
     influencer_id: str
     message_content: str
+    message_type: str = "user"  # user 또는 ai
     end_at: str | None = None
 
 
@@ -373,9 +375,12 @@ async def create_chat_message(
         )
 
     message = ChatMessage(
+        chat_message_id=str(uuid.uuid4()),
+        session_id=message_data.session_id if hasattr(message_data, 'session_id') else str(uuid.uuid4()),
         influencer_id=message_data.influencer_id,
         message_content=message_data.message_content,
-        created_at=get_current_kst().isoformat(),
+        message_type=message_data.message_type,
+        created_at=get_current_kst(),
         end_at=message_data.end_at,
     )
 
@@ -388,7 +393,7 @@ async def create_chat_message(
 
 @router.get("/{session_id}", response_model=ChatMessageSchema)
 async def get_chat_message(
-    session_id: int,
+    session_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):

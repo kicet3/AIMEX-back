@@ -12,10 +12,12 @@ from .influencer import (
     StylePreset,
     AIInfluencer,
     BatchKey,
-    ChatMessage,
     InfluencerAPI,
     APICallAggregation,
 )
+
+# 채팅 메시지 모델
+from .chat_message import ChatMessage
 
 # 게시글 관련 모델들
 from .board import Board
