@@ -446,17 +446,15 @@ async def chatbot_chat_stream(
                 if not hf_token or not hf_repo:
                     logger.error(f"필수 파라미터 누락 - hf_token: {'있음' if hf_token else '없음'}, hf_repo: {'있음' if hf_repo else '없음'}")
                     # 스트리밍 에러 응답
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": "모델 설정이 완료되지 않았습니다. 관리자에게 문의하세요."
-                    })
-                    await websocket.close()
+                    error_response = "모델 설정이 완료되지 않았습니다. 관리자에게 문의하세요."
+                    yield f"data: {json.dumps({'text': error_response})}\n\n"
+                    yield f"data: {json.dumps({'done': True})}\n\n"
                     return
                 
-                # 스트리밍 응답 생성 (새로운 방식)
-                token_count = 0
+                # 생각중 상태 전송
+                yield f"data: {json.dumps({'status': 'thinking', 'message': '생각중...'}, ensure_ascii=False)}\n\n"
                 
-                # 새로운 stream 메서드 사용
+                # runsync로 응답을 받고 클라이언트에 스트리밍으로 전달
                 payload = {
                     "input": {
                         "hf_token": hf_token,
@@ -468,20 +466,51 @@ async def chatbot_chat_stream(
                     }
                 }
                 
-                async for token in vllm_manager.stream(payload):
-                    # 각 토큰을 실시간으로 클라이언트에 전송
-                    logger.debug(f"🔄 스트리밍 토큰 전송: {repr(token)}")
-                    yield f"data: {json.dumps({'text': token}, ensure_ascii=False)}\n\n"
-                    token_count += 1
+                # runsync로 전체 응답 받기
+                result = await vllm_manager.runsync(payload)
+                
+                # 응답 처리
+                response_text = ""
+                if result.get("status") == "completed":
+                    response_text = result.get("generated_text", "")
+                    if not response_text:
+                        # 이전 형식 호환성
+                        output = result.get("output", {})
+                        response_text = output.get("generated_text", "")
                     
-                    # 너무 많은 토큰이 오면 중단 (무한 루프 방지)
-                    if token_count > 1000:
-                        logger.warning(f"⚠️ 토큰 수가 너무 많아 중단: {token_count}")
-                        break
+                    if not response_text:
+                        response_text = f"안녕하세요! 저는 {influencer.influencer_name}입니다. 응답 생성 중 문제가 발생했습니다."
+                        
+                    logger.info(f"✅ 생성된 텍스트: {response_text[:100]}...")
+                else:
+                    logger.error(f"❌ RunPod 요청 실패: {result.get('error', 'Unknown error')}")
+                    response_text = f"안녕하세요! 저는 {influencer.influencer_name}입니다. '{request.message}'에 대한 답변을 드리겠습니다."
+                
+                # 타이핑 시작 상태 전송
+                yield f"data: {json.dumps({'status': 'typing', 'message': '답변 입력중...'}, ensure_ascii=False)}\n\n"
+                
+                # 받은 응답을 단어 단위로 분할해서 스트리밍
+                import asyncio
+                words = response_text.split()
+                chunk_size = 2  # 2단어씩 전송
+                
+                for i in range(0, len(words), chunk_size):
+                    chunk_words = words[i:i + chunk_size]
+                    chunk_text = ' '.join(chunk_words)
+                    
+                    # 마지막 청크가 아니면 공백 추가
+                    if i + chunk_size < len(words):
+                        chunk_text += ' '
+                    
+                    # 클라이언트에 청크 전송
+                    yield f"data: {json.dumps({'text': chunk_text}, ensure_ascii=False)}\n\n"
+                    
+                    # 스트리밍 효과를 위한 딜레이
+                    await asyncio.sleep(0.1)
                 
                 # 스트리밍 완료 신호
                 yield f"data: {json.dumps({'done': True}, ensure_ascii=False)}\n\n"
-                logger.info(f"✅ RunPod 스트리밍 응답 생성 완료: {influencer.influencer_name}")
+                logger.info(f"✅ RunPod 응답을 스트리밍으로 전달 완료: {influencer.influencer_name}")
 
             except Exception as e:
                 logger.error(f"❌ RunPod 스트리밍 응답 생성 실패: {e}")

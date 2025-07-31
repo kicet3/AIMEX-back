@@ -24,6 +24,7 @@ from typing import List, Dict, Optional
 from app.core.config import settings
 import os
 import httpx
+from app.services.s3_image_service import get_s3_image_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -392,15 +393,17 @@ async def chatbot(
             influencer_info = db.query(AIInfluencer).filter(
                 AIInfluencer.influencer_id == influencer_id
             ).first()
-            
+            s3_service = get_s3_image_service()
             if influencer_info:
                 # 인플루언서 정보를 클라이언트에 전송
                 logger.info(f"[WS] 인플루언서 정보 - 이름: {influencer_info.influencer_name}")
                 logger.info(f"[WS] 인플루언서 정보 - 설명: {influencer_info.influencer_description}")
                 logger.info(f"[WS] 인플루언서 정보 - 이미지 URL: {influencer_info.image_url}")
                 
-                # image_url 확인 및 전송
-                image_url_value = influencer_info.image_url if influencer_info.image_url else None
+                
+                image_url_value = s3_service.generate_presigned_url(
+                    influencer_info.image_url, expiration=3600
+                )
                 logger.info(f"[WS] 인플루언서 이미지 URL 값: {image_url_value}")
                 
                 await websocket.send_text(json.dumps({
@@ -686,10 +689,10 @@ async def chatbot(
                     final_prompt = mcp_result
                     # MCP 응답은 이미 완성된 형태이므로 바로 전송
                     await websocket.send_text(
-                        json.dumps({"type": "token", "content": mcp_result})
+                        json.dumps({"type": "token", "content": mcp_result}, ensure_ascii=False)
                     )
                     await websocket.send_text(
-                        json.dumps({"type": "complete", "content": ""})
+                        json.dumps({"type": "complete", "content": ""}, ensure_ascii=False)
                     )
                     full_response = mcp_result
                     
@@ -755,11 +758,12 @@ async def chatbot(
                     }))
                     continue
 
-                # 스트리밍 응답 생성 (RunPod 사용)
-                token_count = 0
-                full_response = ""
-
-                # 새로운 stream 메서드 사용
+                # 생각중 상태 전송
+                await websocket.send_text(
+                    json.dumps({"type": "thinking", "message": "생각중..."}, ensure_ascii=False)
+                )
+                
+                # runsync로 응답 생성 후 클라이언트에 스트리밍으로 전달
                 payload = {
                     "input": {
                         "hf_token": hf_token,
@@ -771,24 +775,57 @@ async def chatbot(
                     }
                 }
                 
-                async for token in vllm_manager.stream(payload):
-                    # 각 토큰을 실시간으로 클라이언트에 전송
+                # runsync로 전체 응답 받기
+                result = await vllm_manager.runsync(payload)
+                
+                # 응답 처리
+                full_response = ""
+                if result.get("status") == "completed":
+                    full_response = result.get("generated_text", "")
+                    if not full_response:
+                        # 이전 형식 호환성
+                        output = result.get("output", {})
+                        full_response = output.get("generated_text", "")
+                    
+                    if not full_response:
+                        full_response = "응답 생성 중 문제가 발생했습니다."
+                        
+                    logger.info(f"[WS] 생성된 텍스트: {full_response[:100]}...")
+                else:
+                    logger.error(f"[WS] RunPod 요청 실패: {result.get('error', 'Unknown error')}")
+                    full_response = "응답 생성 중 문제가 발생했습니다."
+                
+                # 타이핑 시작 상태 전송 
+                await websocket.send_text(
+                    json.dumps({"type": "typing", "message": "답변 입력중..."}, ensure_ascii=False)
+                )
+                
+                # 받은 응답을 단어 단위로 분할해서 스트리밍
+                import asyncio
+                words = full_response.split()
+                chunk_size = 2  # 2단어씩 전송
+                token_count = 0
+                
+                for i in range(0, len(words), chunk_size):
+                    chunk_words = words[i:i + chunk_size]
+                    chunk_text = ' '.join(chunk_words)
+                    
+                    # 마지막 청크가 아니면 공백 추가
+                    if i + chunk_size < len(words):
+                        chunk_text += ' '
+                    
+                    # 클라이언트에 청크 전송
                     await websocket.send_text(
-                        json.dumps({"type": "token", "content": token})
+                        json.dumps({"type": "token", "content": chunk_text}, ensure_ascii=False)
                     )
-                    full_response += token
                     token_count += 1
-
-                    # 너무 많은 토큰이 오면 중단 (무한 루프 방지)
-                    if token_count > 2000:
-                        logger.warning(
-                            f"[WS] 토큰 수가 너무 많아 중단: {token_count}"
-                        )
-                        break
+                    
+                    # 스트리밍 효과를 위한 딜레이
+                    await asyncio.sleep(0.1)
 
                 # 스트리밍 완료 신호
                 await websocket.send_text(
-                    json.dumps({"type": "complete", "content": ""})
+                    json.dumps({"type": "complete", "content": ""}, ensure_ascii=False)
                 )
 
                 # TTS 생성 시작 (비동기로 처리)
