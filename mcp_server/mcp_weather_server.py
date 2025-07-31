@@ -1,5 +1,5 @@
 """
-MCP Weather Server - FastMCP 사용
+MCP Weather Server - 기상청 공공데이터 API 사용
 """
 
 import logging
@@ -8,7 +8,8 @@ from mcp.server.fastmcp import FastMCP
 import httpx
 import asyncio
 from datetime import datetime, timedelta
-import random
+import xml.etree.ElementTree as ET
+import json
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -19,138 +20,142 @@ mcp = FastMCP("Weather")
 
 import os
 
-# 날씨 API 설정 (OpenWeatherMap 사용 예시)
-WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "")  # 환경변수에서 API 키 가져오기
-WEATHER_BASE_URL = "http://api.openweathermap.org/data/2.5"
+# 기상청 API 설정
+KMA_API_KEY = os.environ.get("KMA_API_KEY", "")  # 기상청 API 키
+KMA_BASE_URL = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0"
 
 # API 키 상태 로깅
-if WEATHER_API_KEY:
-    logger.info(f"[날씨] WEATHER_API_KEY 설정됨: {WEATHER_API_KEY[:8]}...")
+if KMA_API_KEY:
+    logger.info(f"[날씨] KMA_API_KEY 설정됨: {KMA_API_KEY[:8]}...")
 else:
     logger.warning(
-        "[날씨] WEATHER_API_KEY가 설정되지 않았습니다. 시뮬레이션 모드로 실행됩니다."
+        "[날씨] KMA_API_KEY가 설정되지 않았습니다. 시뮬레이션 모드로 실행됩니다."
     )
-    logger.info("[날씨] 환경변수 설정 방법: export WEATHER_API_KEY='your_api_key_here'")
+    logger.info("[날씨] 환경변수 설정 방법: export KMA_API_KEY='your_api_key_here'")
 
 
-def korean_to_english_city(city: str) -> str:
-    """한글 도시명을 영문 도시명으로 변환 (OpenWeatherMap 호환)"""
+def get_kma_grid_coordinates(city: str) -> tuple:
+    """도시명을 기상청 격자 좌표로 변환"""
     mapping = {
-        '서울': 'Seoul',
-        '부산': 'Busan',
-        '대구': 'Daegu',
-        '인천': 'Incheon',
-        '광주': 'Gwangju',
-        '대전': 'Daejeon',
-        '울산': 'Ulsan',
-        '세종': 'Sejong',
-        '수원': 'Suwon',
-        '성남': 'Seongnam',
-        '고양': 'Goyang',
-        '용인': 'Yongin',
-        '창원': 'Changwon',
-        '청주': 'Cheongju',
-        '천안': 'Cheonan',
-        '전주': 'Jeonju',
-        '안산': 'Ansan',
-        '안양': 'Anyang',
-        '남양주': 'Namyangju',
-        '화성': 'Hwaseong',
-        '김해': 'Gimhae',
-        '평택': 'Pyeongtaek',
-        '진주': 'Jinju',
-        '포항': 'Pohang',
-        '제주': 'Jeju',
+        '서울': (60, 127),
+        '부산': (98, 76),
+        '대구': (89, 90),
+        '인천': (55, 124),
+        '광주': (58, 74),
+        '대전': (67, 100),
+        '울산': (102, 84),
+        '세종': (66, 103),
+        '수원': (60, 120),
+        '성남': (62, 123),
+        '고양': (57, 128),
+        '용인': (64, 119),
+        '창원': (89, 76),
+        '청주': (69, 106),
+        '천안': (63, 110),
+        '전주': (63, 89),
+        '안산': (58, 114),
+        '안양': (59, 123),
+        '남양주': (64, 128),
+        '화성': (57, 119),
+        '김해': (95, 77),
+        '평택': (62, 114),
+        '진주': (81, 75),
+        '포항': (102, 94),
+        '제주': (53, 38),
         # 필요시 추가
     }
-    return mapping.get(city.strip(), city)
+    return mapping.get(city.strip(), (60, 127))  # 기본값: 서울
 
 
-def city_to_latlon(city: str):
-    """도시명(영문) → (위도, 경도) 변환 (주요 도시만 하드코딩, 없으면 서울)"""
-    mapping = {
-        'Seoul': (37.5665, 126.9780),
-        'Busan': (35.1796, 129.0756),
-        'Daegu': (35.8722, 128.6025),
-        'Incheon': (37.4563, 126.7052),
-        'Gwangju': (35.1595, 126.8526),
-        'Daejeon': (36.3504, 127.3845),
-        'Ulsan': (35.5384, 129.3114),
-        'Sejong': (36.4800, 127.2890),
-        'Suwon': (37.2636, 127.0286),
-        'Jeju': (33.4996, 126.5312),
-        # 필요시 추가
-    }
-    return mapping.get(city, (37.5665, 126.9780))
+def get_current_time_for_kma() -> tuple:
+    """기상청 API 호출을 위한 현재 시간 정보 반환"""
+    now = datetime.now()
+    
+    # 기상청 API는 매시 45분에 발표, 10분 후부터 조회 가능
+    if now.minute < 55:
+        # 이전 발표 시간 사용
+        if now.hour == 0:
+            base_time = "2300"
+            base_date = (now - timedelta(days=1)).strftime("%Y%m%d")
+        else:
+            base_time = f"{(now.hour - 1):02d}00"
+            base_date = now.strftime("%Y%m%d")
+    else:
+        # 현재 발표 시간 사용
+        base_time = f"{now.hour:02d}00"
+        base_date = now.strftime("%Y%m%d")
+    
+    return base_date, base_time
 
 
-async def get_real_weather_data(location: str) -> Dict[str, Any]:
-    """실제 날씨 API에서 데이터를 가져옵니다."""
-    # API 키가 없으면 시뮬레이션 모드
-    if not WEATHER_API_KEY:
-        logger.info(
-            "[날씨] WEATHER_API_KEY가 설정되지 않아 시뮬레이션 모드로 실행됩니다."
-        )
+async def get_kma_weather_data(location: str) -> Dict[str, Any]:
+    """기상청 API에서 현재 날씨 데이터를 가져옵니다."""
+    if not KMA_API_KEY:
+        logger.info("[날씨] KMA_API_KEY가 설정되지 않아 시뮬레이션 모드로 실행됩니다.")
         return None
 
     try:
-        # 한글 도시명 영문 변환
-        location_en = korean_to_english_city(location)
-        # OpenWeatherMap API 호출
-        url = f"{WEATHER_BASE_URL}/weather"
+        base_date, base_time = get_current_time_for_kma()
+        nx, ny = get_kma_grid_coordinates(location)
+        
+        url = f"{KMA_BASE_URL}/getUltraSrtNcst"
         params = {
-            "q": location_en,
-            "appid": WEATHER_API_KEY,
-            "units": "metric",
-            "lang": "kr",
+            "serviceKey": KMA_API_KEY,
+            "pageNo": "1",
+            "numOfRows": "1000",
+            "dataType": "JSON",
+            "base_date": base_date,
+            "base_time": base_time,
+            "nx": str(nx),
+            "ny": str(ny)
         }
 
         async with httpx.AsyncClient() as client:
             response = await client.get(url, params=params)
             if response.status_code == 200:
                 data = response.json()
-                return {
-                    "temperature": data["main"]["temp"],
-                    "condition": data["weather"][0]["description"],
-                    "humidity": data["main"]["humidity"],
-                    "wind_speed": data["wind"]["speed"],
-                    "pressure": data["main"]["pressure"],
-                }
+                
+                if data.get("response", {}).get("header", {}).get("resultCode") == "00":
+                    items = data["response"]["body"]["items"]["item"]
+                    
+                    weather_data = {}
+                    for item in items:
+                        category = item["category"]
+                        value = item["obsrValue"]
+                        
+                        if category == "T1H":  # 기온
+                            weather_data["temperature"] = float(value)
+                        elif category == "RN1":  # 1시간 강수량
+                            weather_data["rainfall"] = float(value)
+                        elif category == "REH":  # 습도
+                            weather_data["humidity"] = float(value)
+                        elif category == "WSD":  # 풍속
+                            weather_data["wind_speed"] = float(value)
+                        elif category == "PTY":  # 강수형태
+                            weather_data["precipitation_type"] = int(value)
+                    
+                    return weather_data
+                else:
+                    logger.warning(f"기상청 API 응답 오류: {data}")
+                    return None
             else:
-                logger.warning(f"날씨 API 호출 실패: {response.status_code}")
+                logger.warning(f"기상청 API 호출 실패: {response.status_code}")
                 return None
     except Exception as e:
-        logger.error(f"날씨 API 호출 중 오류: {e}")
+        logger.error(f"기상청 API 호출 중 오류: {e}")
         return None
 
 
-# 시뮬레이션/랜덤/가짜 날씨 데이터 생성 코드 전체 삭제
-# 실제 API 실패 시 에러 메시지 반환만 남김
-
-
-# 날씨 상태 한글 번역 후처리 매핑 함수 추가
-
-def map_weather_description(description: str) -> str:
+def get_precipitation_description(pty: int) -> str:
+    """강수형태 코드를 한글 설명으로 변환"""
     mapping = {
-        '온흐림': '흐림',
-        '튼구름': '구름 조금',
-        '튼튼구름': '구름 많음',
-        '맑음': '맑음',
-        '비': '비',
-        '구름조금': '구름 조금',
-        '구름많음': '구름 많음',
-        '흐림': '흐림',
-        '약한비': '약한 비',
-        '강한비': '강한 비',
-        '소나기': '소나기',
-        '눈': '눈',
-        '박무': '안개',
-        '연무': '안개',
-        '안개': '안개',
-        '박무,연무': '안개',
-        # 필요시 추가
+        0: "없음",
+        1: "비",
+        2: "비/눈",
+        3: "눈",
+        4: "소나기"
     }
-    return mapping.get(description.strip(), description)
+    return mapping.get(pty, "알 수 없음")
 
 
 @mcp.tool()
@@ -159,17 +164,24 @@ async def get_current_weather(location: str = "서울") -> str:
     try:
         if not location or location.strip() == "":
             location = "서울"
-        # 한글 도시명 영문 변환
-        location_en = korean_to_english_city(location)
-        weather_data = await get_real_weather_data(location_en)
+        
+        weather_data = await get_kma_weather_data(location)
         if weather_data:
-            condition = map_weather_description(weather_data['condition'])
+            temp = weather_data.get("temperature", "알 수 없음")
+            humidity = weather_data.get("humidity", "알 수 없음")
+            wind_speed = weather_data.get("wind_speed", "알 수 없음")
+            rainfall = weather_data.get("rainfall", 0)
+            pty = weather_data.get("precipitation_type", 0)
+            
+            condition = get_precipitation_description(pty)
+            if rainfall > 0:
+                condition = f"{condition} ({rainfall}mm)"
+            
             response = (
-                f"기온: {weather_data['temperature']}°C, "
+                f"기온: {temp}°C, "
                 f"상태: {condition}, "
-                f"습도: {weather_data['humidity']}%, "
-                f"풍속: {weather_data['wind_speed']}m/s, "
-                f"기압: {weather_data['pressure']}hPa"
+                f"습도: {humidity}%, "
+                f"풍속: {wind_speed}m/s"
             )
             return response
         else:
@@ -181,119 +193,223 @@ async def get_current_weather(location: str = "서울") -> str:
 
 @mcp.tool()
 async def get_weather_forecast(location: str = "서울", days: int = 3) -> str:
-    """지정된 위치의 날씨 예보(오늘/내일/모레 평균) 정보를 가져옵니다."""
+    """지정된 위치의 날씨 예보 정보를 가져옵니다."""
     try:
         if not location or location.strip() == "":
             location = "서울"
-        location_en = korean_to_english_city(location)
-        lat, lon = city_to_latlon(location_en)
-        url = f"{WEATHER_BASE_URL}/forecast"
-        params = {"lat": lat, "lon": lon, "appid": WEATHER_API_KEY, "units": "metric", "lang": "kr"}
+        
+        if not KMA_API_KEY:
+            return "기상청 API 키가 설정되지 않았습니다. 환경변수 KMA_API_KEY를 설정해주세요."
+        
+        base_date, base_time = get_current_time_for_kma()
+        nx, ny = get_kma_grid_coordinates(location)
+        
+        url = f"{KMA_BASE_URL}/getVilageFcst"
+        params = {
+            "serviceKey": KMA_API_KEY,
+            "pageNo": "1",
+            "numOfRows": "1000",
+            "dataType": "JSON",
+            "base_date": base_date,
+            "base_time": base_time,
+            "nx": str(nx),
+            "ny": str(ny)
+        }
+
         async with httpx.AsyncClient() as client:
             response = await client.get(url, params=params)
             if response.status_code == 200:
                 data = response.json()
-                # 3일치 평균값 계산
-                from collections import defaultdict
-                import datetime
-                day_stats = defaultdict(list)
-                for entry in data["list"]:
-                    dt = datetime.datetime.fromtimestamp(entry["dt"])
-                    day = dt.date()
-                    temp = entry["main"]["temp"]
-                    condition = map_weather_description(entry["weather"][0]["description"])
-                    day_stats[day].append((temp, condition))
-                days_sorted = sorted(day_stats.keys())[:days]
-                result_parts = []
-                for d in days_sorted:
-                    temps = [t for t, _ in day_stats[d]]
-                    conds = [c for _, c in day_stats[d]]
-                    avg_temp = round(sum(temps) / len(temps), 1)
-                    main_cond = max(set(conds), key=conds.count)
-                    result_parts.append(f"{d}: 기온: {avg_temp}°C, 상태: {main_cond}")
-                return ", ".join(result_parts)
+                
+                if data.get("response", {}).get("header", {}).get("resultCode") == "00":
+                    items = data["response"]["body"]["items"]["item"]
+                    
+                    # 날짜별 데이터 정리
+                    from collections import defaultdict
+                    day_data = defaultdict(dict)
+                    
+                    for item in items:
+                        fcst_date = item["fcstDate"]
+                        fcst_time = item["fcstTime"]
+                        category = item["category"]
+                        value = item["fcstValue"]
+                        
+                        if category == "TMP":  # 기온
+                            day_data[fcst_date]["temp"] = value
+                        elif category == "SKY":  # 하늘상태
+                            day_data[fcst_date]["sky"] = value
+                        elif category == "PTY":  # 강수형태
+                            day_data[fcst_date]["pty"] = value
+                    
+                    # 결과 구성
+                    result_parts = []
+                    sorted_dates = sorted(day_data.keys())[:days]
+                    
+                    for date in sorted_dates:
+                        temp = day_data[date].get("temp", "알 수 없음")
+                        sky = day_data[date].get("sky", "알 수 없음")
+                        pty = day_data[date].get("pty", "0")
+                        
+                        # 하늘상태 변환
+                        sky_desc = {
+                            "1": "맑음",
+                            "3": "구름많음",
+                            "4": "흐림"
+                        }.get(sky, "알 수 없음")
+                        
+                        # 강수형태 변환
+                        pty_desc = get_precipitation_description(int(pty))
+                        
+                        date_str = f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+                        result_parts.append(f"{date_str}: 기온 {temp}°C, {sky_desc}, {pty_desc}")
+                    
+                    return ", ".join(result_parts)
+                else:
+                    return f"죄송합니다. 현재 {location}의 날씨 예보 정보를 가져올 수 없습니다."
             else:
-                return f"죄송합니다. 현재 {location}({location_en})의 날씨 예보 정보를 가져올 수 없습니다."
+                return f"죄송합니다. 기상청 API 호출에 실패했습니다. (상태코드: {response.status_code})"
     except Exception as e:
         logger.error(f"날씨 예보 가져오기 실패: {e}")
         return f"죄송해요! {location}의 날씨 예보를 가져오는 중에 오류가 발생했어요."
 
 
 @mcp.tool()
-async def get_air_quality(location: str = "서울") -> str:
-    """지정된 위치의 대기질 정보를 가져옵니다."""
+async def get_ultra_short_forecast(location: str = "서울") -> str:
+    """지정된 위치의 초단기예보(6시간 이내) 정보를 가져옵니다."""
     try:
         if not location or location.strip() == "":
             location = "서울"
-        location_en = korean_to_english_city(location)
-        lat, lon = city_to_latlon(location_en)
-        url = f"{WEATHER_BASE_URL}/air_pollution"
-        params = {"lat": lat, "lon": lon, "appid": WEATHER_API_KEY}
+        
+        if not KMA_API_KEY:
+            return "기상청 API 키가 설정되지 않았습니다. 환경변수 KMA_API_KEY를 설정해주세요."
+        
+        base_date, base_time = get_current_time_for_kma()
+        nx, ny = get_kma_grid_coordinates(location)
+        
+        url = f"{KMA_BASE_URL}/getUltraSrtFcst"
+        params = {
+            "serviceKey": KMA_API_KEY,
+            "pageNo": "1",
+            "numOfRows": "1000",
+            "dataType": "JSON",
+            "base_date": base_date,
+            "base_time": base_time,
+            "nx": str(nx),
+            "ny": str(ny)
+        }
+
         async with httpx.AsyncClient() as client:
             response = await client.get(url, params=params)
             if response.status_code == 200:
                 data = response.json()
-                aqi = data["list"][0]["main"]["aqi"]
-                components = data["list"][0]["components"]
-                aqi_levels = {
-                    1: "좋음",
-                    2: "보통",
-                    3: "나쁨",
-                    4: "매우 나쁨",
-                    5: "위험",
-                }
-                level = aqi_levels.get(aqi, "알 수 없음")
-                pm10 = components.get("pm10", "-")
-                pm2_5 = components.get("pm2_5", "-")
-                co = components.get("co", "-")
-                no2 = components.get("no2", "-")
-                so2 = components.get("so2", "-")
-                o3 = components.get("o3", "-")
-                response = (
-                    f"대기질: {level}, PM10: {pm10}㎍/m³, PM2.5: {pm2_5}㎍/m³, CO: {co}ppm, NO2: {no2}ppm, SO2: {so2}ppm, O3: {o3}ppm"
-                )
-                return response
+                
+                if data.get("response", {}).get("header", {}).get("resultCode") == "00":
+                    items = data["response"]["body"]["items"]["item"]
+                    
+                    # 시간별 데이터 정리
+                    from collections import defaultdict
+                    time_data = defaultdict(dict)
+                    
+                    for item in items:
+                        fcst_date = item["fcstDate"]
+                        fcst_time = item["fcstTime"]
+                        category = item["category"]
+                        value = item["fcstValue"]
+                        
+                        time_key = f"{fcst_date}_{fcst_time}"
+                        
+                        if category == "T1H":  # 기온
+                            time_data[time_key]["temp"] = value
+                        elif category == "RN1":  # 1시간 강수량
+                            time_data[time_key]["rainfall"] = value
+                        elif category == "SKY":  # 하늘상태
+                            time_data[time_key]["sky"] = value
+                        elif category == "PTY":  # 강수형태
+                            time_data[time_key]["pty"] = value
+                    
+                    # 결과 구성 (최대 6시간)
+                    result_parts = []
+                    sorted_times = sorted(time_data.keys())[:6]
+                    
+                    for time_key in sorted_times:
+                        date, time = time_key.split("_")
+                        temp = time_data[time_key].get("temp", "알 수 없음")
+                        sky = time_data[time_key].get("sky", "알 수 없음")
+                        pty = time_data[time_key].get("pty", "0")
+                        rainfall = time_data[time_key].get("rainfall", "0")
+                        
+                        # 하늘상태 변환
+                        sky_desc = {
+                            "1": "맑음",
+                            "3": "구름많음",
+                            "4": "흐림"
+                        }.get(sky, "알 수 없음")
+                        
+                        # 강수형태 변환
+                        pty_desc = get_precipitation_description(int(pty))
+                        
+                        time_str = f"{time[:2]}:{time[2:4]}"
+                        result_parts.append(f"{time_str}: {temp}°C, {sky_desc}, {pty_desc}")
+                    
+                    return ", ".join(result_parts)
+                else:
+                    return f"죄송합니다. 현재 {location}의 초단기예보 정보를 가져올 수 없습니다."
             else:
-                return f"죄송합니다. 현재 {location}({location_en})의 대기질 정보를 가져올 수 없습니다."
+                return f"죄송합니다. 기상청 API 호출에 실패했습니다. (상태코드: {response.status_code})"
     except Exception as e:
-        logger.error(f"대기질 정보 가져오기 실패: {e}")
-        return f"죄송해요! {location}의 대기질 정보를 가져오는 중에 오류가 발생했어요."
+        logger.error(f"초단기예보 가져오기 실패: {e}")
+        return f"죄송해요! {location}의 초단기예보를 가져오는 중에 오류가 발생했어요."
 
 
 @mcp.tool()
-async def get_uv_index(location: str = "서울") -> str:
-    """지정된 위치의 자외선 지수를 가져옵니다."""
+async def get_weather_warning(location: str = "서울") -> str:
+    """지정된 위치의 기상특보 정보를 가져옵니다."""
     try:
         if not location or location.strip() == "":
             location = "서울"
-        location_en = korean_to_english_city(location)
-        lat, lon = city_to_latlon(location_en)
-        url = f"http://api.openweathermap.org/data/2.5/uvi"
-        params = {"lat": lat, "lon": lon, "appid": WEATHER_API_KEY}
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params)
-            if response.status_code == 200:
-                data = response.json()
-                uv_index = data.get("value", "-")
-                level = "낮음"
-                if isinstance(uv_index, (int, float)):
-                    if uv_index <= 2:
-                        level = "낮음"
-                    elif uv_index <= 5:
-                        level = "보통"
-                    elif uv_index <= 7:
-                        level = "높음"
-                    elif uv_index <= 10:
-                        level = "매우 높음"
-                    else:
-                        level = "위험"
-                response = f"자외선 지수: {uv_index}, 수준: {level}"
-                return response
-            else:
-                return f"죄송합니다. 현재 {location}({location_en})의 자외선 지수 정보를 가져올 수 없습니다."
+        
+        if not KMA_API_KEY:
+            return "기상청 API 키가 설정되지 않았습니다. 환경변수 KMA_API_KEY를 설정해주세요."
+        
+        # 기상특보 API는 별도 엔드포인트가 필요하므로 현재는 기본 메시지 반환
+        return f"죄송합니다. {location}의 기상특보 정보는 별도 API를 통해 제공됩니다."
     except Exception as e:
-        logger.error(f"자외선 지수 가져오기 실패: {e}")
-        return f"죄송해요! {location}의 자외선 지수를 가져오는 중에 오류가 발생했어요."
+        logger.error(f"기상특보 정보 가져오기 실패: {e}")
+        return f"죄송해요! {location}의 기상특보 정보를 가져오는 중에 오류가 발생했어요."
+
+
+@mcp.tool()
+async def get_mid_term_forecast(location: str = "서울") -> str:
+    """지정된 위치의 중기예보(3일~10일) 정보를 가져옵니다."""
+    try:
+        if not location or location.strip() == "":
+            location = "서울"
+        
+        if not KMA_API_KEY:
+            return "기상청 API 키가 설정되지 않았습니다. 환경변수 KMA_API_KEY를 설정해주세요."
+        
+        # 중기예보 API는 별도 엔드포인트가 필요하므로 현재는 기본 메시지 반환
+        return f"죄송합니다. {location}의 중기예보 정보는 별도 API를 통해 제공됩니다."
+    except Exception as e:
+        logger.error(f"중기예보 정보 가져오기 실패: {e}")
+        return f"죄송해요! {location}의 중기예보 정보를 가져오는 중에 오류가 발생했어요."
+
+
+@mcp.tool()
+async def get_weather_observation(location: str = "서울") -> str:
+    """지정된 위치의 기상관측 정보를 가져옵니다."""
+    try:
+        if not location or location.strip() == "":
+            location = "서울"
+        
+        if not KMA_API_KEY:
+            return "기상청 API 키가 설정되지 않았습니다. 환경변수 KMA_API_KEY를 설정해주세요."
+        
+        # 기상관측 API는 별도 엔드포인트가 필요하므로 현재는 기본 메시지 반환
+        return f"죄송합니다. {location}의 기상관측 정보는 별도 API를 통해 제공됩니다."
+    except Exception as e:
+        logger.error(f"기상관측 정보 가져오기 실패: {e}")
+        return f"죄송해요! {location}의 기상관측 정보를 가져오는 중에 오류가 발생했어요."
 
 
 if __name__ == "__main__":
