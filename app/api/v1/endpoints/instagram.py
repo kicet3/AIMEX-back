@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
 from sqlalchemy.orm import Session
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import json
 import logging
 import os
@@ -10,6 +10,7 @@ import hashlib
 
 from app.database import get_db
 from app.models.influencer import AIInfluencer
+from app.models.conversation import Conversation, ConversationMessage
 from app.schemas.instagram import (
     InstagramConnectRequest, 
     InstagramConnectResponse, 
@@ -25,7 +26,9 @@ from app.core.instagram_service import InstagramService
 from app.core.security import get_current_user
 from app.services.runpod_manager import get_vllm_manager
 from app.services.hf_token_resolver import get_token_for_influencer
+from app.services.conversation_service import ConversationService
 from app.core.config import settings
+import time
 
 
 router = APIRouter()
@@ -481,8 +484,9 @@ async def handle_instagram_dm_event(messaging_event: Dict, db: Session):
             
             # AI 응답 생성
             logger.info("🧠 AI 응답 생성 시작...")
-            ai_response = await generate_ai_response(message_text, influencer, sender_id, db)
+            ai_response, generation_info = await generate_ai_response(message_text, influencer, sender_id, db)
             logger.info(f"🧠 AI 응답 생성 완료: {ai_response[:100]}...")
+            logger.info(f"📊 생성 정보: 모델={generation_info.get('model_used')}, 시간={generation_info.get('generation_time_ms')}ms")
             
             # 인스타그램으로 DM 응답 전송
             logger.info("📤 DM 응답 전송 시작...")
@@ -504,9 +508,40 @@ async def handle_instagram_dm_event(messaging_event: Dict, db: Session):
         import traceback
         logger.error(f"   - 에러 트레이스: {traceback.format_exc()}")
 
-async def generate_ai_response(message_text: str, influencer: AIInfluencer, sender_id: str, db: Session) -> str:
-    """AI 인플루언서 응답 생성 - vLLM 서버 활용"""
+async def generate_ai_response(message_text: str, influencer: AIInfluencer, sender_id: str, db: Session) -> Tuple[str, Dict]:
+    """AI 인플루언서 응답 생성 - vLLM 서버 활용 + 대화 기록 관리"""
+    start_time = time.time()
+    generation_info = {
+        "model_used": None,
+        "generation_time_ms": None,
+        "system_prompt_used": None
+    }
+    
     try:
+        # 대화 서비스 초기화
+        conversation_service = ConversationService(db)
+        
+        # 대화 세션 조회/생성
+        conversation = conversation_service.get_or_create_conversation(
+            influencer_id=influencer.influencer_id,
+            user_instagram_id=sender_id
+        )
+        
+        # 사용자 메시지 저장
+        conversation_service.add_message(
+            conversation_id=conversation.conversation_id,
+            sender_type="user",
+            sender_instagram_id=sender_id,
+            message_text=message_text
+        )
+        
+        # 대화 기록을 포함한 컨텍스트 생성
+        chat_history = conversation_service.build_chat_context(
+            conversation_id=conversation.conversation_id,
+            max_messages=8,  # 최근 8개 메시지 (사용자 4 + AI 4)
+            max_tokens=1500  # 토큰 제한
+        )
+        
         # 인플루언서 개성 정보 활용
         personality = influencer.influencer_personality or "친근하고 도움이 되는 AI 인플루언서"
         tone = influencer.influencer_tone or "친근하고 자연스러운 말투"
@@ -527,8 +562,11 @@ async def generate_ai_response(message_text: str, influencer: AIInfluencer, send
 2. 답변은 2-3문장으로 간결하게 해주세요
 3. 인스타그램 DM이므로 이모지를 적절히 사용하세요
 4. {influencer.influencer_name}의 개성을 살려서 응답하세요
-5. 도움이 되는 정보를 제공하되 너무 길지 않게 해주세요"""
+5. 도움이 되는 정보를 제공하되 너무 길지 않게 해주세요
+6. 이전 대화 내용을 참고해서 자연스럽게 대화를 이어가세요"""
             logger.info("⚠️ 저장된 시스템 프롬프트가 없어 기본 시스템 메시지 사용")
+        
+        generation_info["system_prompt_used"] = system_message
         
         # vLLM 서버를 통한 AI 응답 생성
         try:
@@ -536,75 +574,109 @@ async def generate_ai_response(message_text: str, influencer: AIInfluencer, send
             vllm_manager = get_vllm_manager()
             if not await vllm_manager.health_check():
                 logger.warning("⚠️ vLLM 서버에 접근할 수 없습니다. 기본 응답을 사용합니다.")
-                return f"안녕하세요! {influencer.influencer_name}입니다! 😊 메시지 감사해요! 더 자세히 말씀해주시면 도움드릴게요!"
-            
-            # 파인튜닝된 모델이 있는 경우 해당 모델 사용
-            model_repo = None
-            if influencer.influencer_model_repo:
-                logger.info(f"🤖 인플루언서 전용 모델 사용: {influencer.influencer_model_repo}")
-                model_repo = influencer.influencer_model_repo
-                
-                # RunPod는 동적으로 어댑터를 로드하므로 미리 로드할 필요 없음
-                logger.info(f"🤖 RunPod에서 동적으로 어댑터 로드: {model_repo}")
+                response = f"안녕하세요! {influencer.influencer_name}입니다! 😊 메시지 감사해요! 더 자세히 말씀해주시면 도움드릴게요!"
+                generation_info["model_used"] = "fallback"
             else:
-                logger.info(f"🤖 기본 AI 모델로 응답 생성")
-            
-            # 메시지 구성
-            messages = []
-            if system_message:
-                messages.append({"role": "system", "content": system_message})
-            messages.append({"role": "user", "content": message_text})
-            
-            # RunPod vLLM worker에 맞는 페이로드 구성
-            payload = {
-                "input": {
-                    "messages": messages,
-                    "max_tokens": 300,
-                    "temperature": 0.7,
-                    "stream": False
-                }
-            }
-            
-            # LoRA 어댑터가 있는 경우에만 추가
-            if model_repo:
-                payload["input"]["lora_adapter"] = str(model_repo)
-                payload["input"]["hf_repo"] = model_repo
-            
-            # vLLM 매니저로 응답 생성 요청
-            result = await vllm_manager.runsync(payload)
-            
-            # 결과에서 텍스트 추출
-            if result.get("status") == "completed" and result.get("output"):
-                output = result["output"]
-                if output.get("status") == "success":
-                    response = output.get("generated_text", "")
+                # 파인튜닝된 모델이 있는 경우 해당 모델 사용
+                model_repo = None
+                if influencer.influencer_model_repo:
+                    logger.info(f"🤖 인플루언서 전용 모델 사용: {influencer.influencer_model_repo}")
+                    model_repo = influencer.influencer_model_repo
+                    generation_info["model_used"] = model_repo
                 else:
-                    response = ""
-            else:
-                response = result.get("generated_text", "")
-            
-            # 응답 후처리
-            response = response.strip()
-            
-            # 너무 길면 자르기 (DM은 간결해야 함)
-            if len(response) > 300:
-                response = response[:300] + "..."
-            
-            # 빈 응답인 경우 기본 응답 제공
-            if not response:
-                response = f"안녕하세요! {influencer.influencer_name}입니다! 😊 메시지 감사해요!"
-            
-            logger.info(f"✅ vLLM 서버를 통한 AI 응답 생성 완료")
-            return response
+                    logger.info(f"🤖 기본 AI 모델로 응답 생성")
+                    generation_info["model_used"] = "base_model"
                 
+                # HuggingFace 토큰 조회
+                hf_token = None
+                if influencer.hf_manage_id:
+                    try:
+                        hf_token = get_token_for_influencer(influencer.influencer_id, db)
+                        logger.info(f"✅ HF 토큰 조회 완료")
+                    except Exception as token_error:
+                        logger.warning(f"⚠️ HF 토큰 조회 실패: {token_error}")
+                
+                # 메시지 구성 (대화 기록 포함)
+                messages = []
+                if system_message:
+                    messages.append({"role": "system", "content": system_message})
+                
+                # 대화 기록 추가 (최근 메시지가 맨 마지막에 오도록)
+                messages.extend(chat_history)
+                
+                # RunPod vLLM worker에 맞는 페이로드 구성
+                payload = {
+                    "input": {
+                        "hf_token": hf_token or "dummy_token",
+                        "hf_repo": model_repo or "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct",
+                        "system_message": system_message,
+                        "prompt": message_text,
+                        "temperature": 0.7,
+                        "max_tokens": 300,
+                        "top_p": 0.9,
+                        "top_k": 50,
+                        "repetition_penalty": 1.1
+                    }
+                }
+                
+                # vLLM 매니저로 응답 생성 요청
+                logger.info(f"🚀 vLLM runsync 요청 시작...")
+                result = await vllm_manager.runsync(payload)
+                
+                # 결과에서 텍스트 추출
+                response = ""
+                if result.get("status") == "completed":
+                    if "generated_text" in result:
+                        response = result["generated_text"]
+                    elif result.get("output") and "generated_text" in result["output"]:
+                        response = result["output"]["generated_text"]
+                
+                # 응답 후처리
+                response = response.strip()
+                
+                # 너무 길면 자르기 (DM은 간결해야 함)
+                if len(response) > 300:
+                    response = response[:300] + "..."
+                
+                # 빈 응답인 경우 기본 응답 제공
+                if not response:
+                    response = f"안녕하세요! {influencer.influencer_name}입니다! 😊 메시지 감사해요!"
+                
+                logger.info(f"✅ vLLM 서버를 통한 AI 응답 생성 완료: {len(response)} chars")
+        
         except Exception as model_error:
             logger.error(f"❌ vLLM 서버 응답 생성 실패: {str(model_error)}")
             # vLLM 서버 실패 시 기본 응답
-            return f"안녕하세요! {influencer.influencer_name}입니다! 😊 메시지 감사해요! 더 자세히 말씀해주시면 도움드릴게요!"
+            response = f"안녕하세요! {influencer.influencer_name}입니다! 😊 메시지 감사해요! 더 자세히 말씀해주시면 도움드릴게요!"
+            generation_info["model_used"] = "error_fallback"
+        
+        # 생성 시간 계산
+        generation_time_ms = int((time.time() - start_time) * 1000)
+        generation_info["generation_time_ms"] = generation_time_ms
+        
+        # AI 응답 메시지 저장
+        conversation_service.add_message(
+            conversation_id=conversation.conversation_id,
+            sender_type="ai",
+            sender_instagram_id=influencer.instagram_id,
+            message_text=response,
+            generation_time_ms=generation_time_ms,
+            model_used=generation_info["model_used"],
+            system_prompt_used=generation_info["system_prompt_used"]
+        )
+        
+        logger.info(f"✅ AI 응답 생성 및 DB 저장 완료 - 시간: {generation_time_ms}ms")
+        return response, generation_info
             
     except Exception as e:
         logger.error(f"❌ AI 응답 생성 오류: {str(e)}")
-        return f"안녕하세요! {influencer.influencer_name}입니다! 😅 죄송해요, 지금 응답을 생성하는 중에 문제가 생겼어요. 다시 한 번 말씀해주시겠어요?"
+        fallback_response = f"안녕하세요! {influencer.influencer_name}입니다! 😅 죄송해요, 지금 응답을 생성하는 중에 문제가 생겼어요. 다시 한 번 말씀해주시겠어요?"
+        
+        # 에러 정보 기록
+        generation_info["generation_time_ms"] = int((time.time() - start_time) * 1000)
+        generation_info["model_used"] = "error"
+        
+        return fallback_response, generation_info
 
 
 

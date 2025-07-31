@@ -77,6 +77,7 @@ class AIInfluencer(Base, TimestampMixin):
 
     influencer_id = Column(
         String(255),
+        primary_key=True,
         default=lambda: str(uuid.uuid4()),
         comment="인플루언서 고유 식별자",
     )
@@ -170,6 +171,8 @@ class AIInfluencer(Base, TimestampMixin):
         "MCPServer",
         secondary="AI_INFLUENCER_MCP_SERVER",
         back_populates="ai_influencers",
+    )
+    conversations = relationship("Conversation", back_populates="influencer"
     )
 
     influencer_personality = Column(Text, comment="AI 인플루언서 성격")

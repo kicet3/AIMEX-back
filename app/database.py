@@ -104,6 +104,7 @@ def init_database():
         from app.models.content_enhancement import ContentEnhancement
         from app.models.prompt_optimization import PromptOptimization, PromptOptimizationUsage, PromptTemplate
         from app.models.image_storage import ImageStorage
+        from app.models.conversation import Conversation, ConversationMessage
 
         # 테이블 생성
         Base.metadata.create_all(bind=engine)
