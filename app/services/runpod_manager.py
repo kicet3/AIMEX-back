@@ -606,8 +606,8 @@ class VLLMRunPodManager(BaseRunPodManager):
             if lora_adapter:
                 logger.info(f"🔧 LoRA 어댑터 설정: lora_adapter={lora_adapter}, hf_repo={hf_repo}")
                 if hf_repo:
-                    payload["input"]["lora_adapter"] = f"hf://{hf_repo}"
-                    logger.info(f"✅ HF repository 경로 사용: hf://{hf_repo}")
+                    payload["input"]["lora_adapter"] = f"{hf_repo}"
+                    logger.info(f"✅ HF repository 경로 사용: {hf_repo}")
                 else:
                     payload["input"]["lora_adapter"] = lora_adapter
                     logger.warning(f"⚠️ HF repository 없이 UUID 사용: {lora_adapter}")

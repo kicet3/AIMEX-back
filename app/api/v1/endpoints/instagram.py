@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
 from sqlalchemy.orm import Session
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 import json
 import logging
 import os
+import hmac
+import hashlib
 
 from app.database import get_db
 from app.models.influencer import AIInfluencer
@@ -23,6 +25,8 @@ from app.core.instagram_service import InstagramService
 from app.core.security import get_current_user
 from app.services.runpod_manager import get_vllm_manager
 from app.services.hf_token_resolver import get_token_for_influencer
+from app.core.config import settings
+
 
 router = APIRouter()
 instagram_service = InstagramService()
@@ -305,19 +309,73 @@ async def verify_instagram_connection(
             detail=f"인스타그램 연동 검증에 실패했습니다: {str(e)}"
         )
 
+async def verify_webhook_signature(
+    request: Request,
+    x_hub_signature_256: Optional[str] = Header(None)
+) -> bool:
+    """Instagram 웹훅 서명 검증"""
+    try:
+        if not x_hub_signature_256:
+            logger.warning("⚠️ X-Hub-Signature-256 헤더가 없습니다.")
+            return False
+        
+        # 설정에서 Instagram App Secret 가져오기
+        app_secret = settings.INSTAGRAM_APP_SECRET
+        if not app_secret:
+            logger.error("❌ INSTAGRAM_APP_SECRET이 설정되지 않았습니다.")
+            return False
+        
+        # 요청 본문을 바이트로 가져오기
+        body_bytes = await request.body()
+        
+        # HMAC-SHA256 서명 생성
+        expected_signature = hmac.new(
+            app_secret.encode('utf-8'),
+            body_bytes,
+            hashlib.sha256
+        ).hexdigest()
+        
+        # "sha256=" 접두사 추가
+        expected_signature = f"sha256={expected_signature}"
+        
+        # 서명 비교 (timing attack 방지를 위해 hmac.compare_digest 사용)
+        is_valid = hmac.compare_digest(expected_signature, x_hub_signature_256)
+        
+        if is_valid:
+            logger.info("✅ 웹훅 서명 검증 성공")
+        else:
+            logger.warning(f"❌ 웹훅 서명 검증 실패")
+            logger.debug(f"   - 예상 서명: {expected_signature}")
+            logger.debug(f"   - 받은 서명: {x_hub_signature_256}")
+        
+        return is_valid
+        
+    except Exception as e:
+        logger.error(f"❌ 웹훅 서명 검증 중 오류 발생: {str(e)}")
+        return False
+
 @router.post("/dm/webhook")
 async def instagram_dm_webhook(
     request: Request,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    x_hub_signature_256: Optional[str] = Header(None)
 ):
     """인스타그램 DM 웹훅 엔드포인트 - 인스타그램에서 DM 메시지를 받아 AI 인플루언서가 자동 답변"""
     try:
+        # 웹훅 서명 검증
+        if not await verify_webhook_signature(request, x_hub_signature_256):
+            # 개발 환경에서는 경고만 출력하고 계속 진행
+            if settings.ENVIRONMENT == "production":
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid webhook signature"
+                )
+            else:
+                logger.warning("⚠️ 개발 환경: 웹훅 서명 검증 실패했지만 계속 진행합니다.")
+        
         # 웹훅 데이터 파싱
         body = await request.json()
         logger.info(f"📨 Instagram DM 웹훅 수신: {json.dumps(body, indent=2, ensure_ascii=False)}")
-        
-        # 웹훅 검증 (개발 단계에서는 생략 가능)
-        # TODO: 실제 운영에서는 웹훅 서명 검증 필요
         
         # 메시지 이벤트 처리
         processed_events = 0
@@ -481,21 +539,21 @@ async def generate_ai_response(message_text: str, influencer: AIInfluencer, send
                 return f"안녕하세요! {influencer.influencer_name}입니다! 😊 메시지 감사해요! 더 자세히 말씀해주시면 도움드릴게요!"
             
             # 파인튜닝된 모델이 있는 경우 해당 모델 사용
-            model_id = None
+            model_repo = None
             if influencer.influencer_model_repo:
                 logger.info(f"🤖 인플루언서 전용 모델 사용: {influencer.influencer_model_repo}")
-                model_id = influencer.influencer_model_repo
+                model_repo = influencer.influencer_model_repo
                 
                 # RunPod는 동적으로 어댑터를 로드하므로 미리 로드할 필요 없음
-                logger.info(f"🤖 RunPod에서 동적으로 어댑터 로드: {model_id}")
+                logger.info(f"🤖 RunPod에서 동적으로 어댑터 로드: {model_repo}")
             else:
                 logger.info(f"🤖 기본 AI 모델로 응답 생성")
             
             # vLLM 매니저로 응답 생성 요청
             result = await vllm_manager.generate_text(
                 prompt=message_text,
-                lora_adapter=str(influencer.influencer_id) if model_id else None,
-                hf_repo=model_id if model_id else None,  # HuggingFace repository 경로
+                lora_adapter=str(model_repo) if model_repo else None,
+                hf_repo=model_repo if model_repo else None,  # HuggingFace repository 경로
                 system_message=system_message,
                 max_tokens=300,
                 temperature=0.7,
@@ -559,8 +617,8 @@ async def instagram_dm_webhook_verification(
 ):
     """인스타그램 웹훅 검증 엔드포인트"""
     try:
-        # 웹훅 검증 토큰 (환경변수에서 가져오기)
-        WEBHOOK_VERIFY_TOKEN = os.getenv("WEBHOOK_VERIFY_TOKEN")
+        # 웹훅 검증 토큰 (설정에서 가져오기)
+        WEBHOOK_VERIFY_TOKEN = settings.WEBHOOK_VERIFY_TOKEN
         
         # 쿼리 파라미터 직접 추출
         hub_mode = request.query_params.get("hub.mode")

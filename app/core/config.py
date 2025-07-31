@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     # 소셜 로그인 설정
     GOOGLE_CLIENT_ID: Optional[str] = None
     GOOGLE_CLIENT_SECRET: Optional[str] = None
+    
+    # Instagram 설정
+    INSTAGRAM_APP_ID: Optional[str] = os.getenv("INSTAGRAM_APP_ID")
+    INSTAGRAM_APP_SECRET: Optional[str] = os.getenv("INSTAGRAM_APP_SECRET")
+    WEBHOOK_VERIFY_TOKEN: Optional[str] = os.getenv("WEBHOOK_VERIFY_TOKEN")
 
     # 허깅페이스 설정
     HUGGINGFACE_API_URL: str = "https://api.huggingface.co"
