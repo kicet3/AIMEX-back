@@ -118,7 +118,8 @@ async def generate_voice(
             "influencer_id": request.influencer_id,
             "base_voice_id": base_voice.id,
             "voice_id": voice_id,  # DB에서 생성된 ID 전달
-            "output_format": "wav"
+            "output_format": "wav",
+            "emotion_name": "neutral"  # 기본 감정 설정
         }
         
         # presigned_url이 있으면 추가 (워커에서 처리)

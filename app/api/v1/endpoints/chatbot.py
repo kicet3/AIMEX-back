@@ -640,45 +640,97 @@ async def chatbot(
                             )
                             enhanced_message = user_message
 
-                # MCP 처리 로직 추가 (현재 비활성화 - MCP 서비스 구현 후 활성화)
-                # TODO: MCP 서비스 구현 후 주석 해제
-                """
+                # MCP 처리 로직 추가
+                mcp_result = None
+                tools_used = []
                 try:
-                    # MCP 처리 (도구 사용)
-                    mcp_result = None
-                    try:
-                        from app.services.mcp_service import MCPService
+                    # MCP 처리를 위한 API 엔드포인트 모듈 가져오기
+                    from app.api.v1.endpoints.mcp import process_with_mcp_tools
+                    from app.services.mcp_server_service import MCPServerService
+                    
+                    logger.info(f"[WS] MCP 처리 시작: {user_message[:50]}...")
+                    
+                    # 인플루언서에게 할당된 MCP 서버 목록 가져오기
+                    mcp_service = MCPServerService(db)
+                    assigned_servers = mcp_service.get_influencer_mcp_servers(influencer_id or "")
+                    selected_servers = [server.mcp_name for server in assigned_servers]
+                    
+                    if selected_servers:
+                        logger.info(f"[WS] 할당된 MCP 서버: {selected_servers}")
+                        # MCP 도구를 사용하여 메시지 처리
+                        mcp_response, tools_used = await process_with_mcp_tools(user_message, selected_servers)
                         
-                        logger.info(f"[WS] MCP 처리 시작: {user_message[:50]}...")
-                        
-                        # MCP 서비스 인스턴스 생성
-                        mcp_service = MCPService(db)
-                        
-                        # MCP 메시지 처리
-                        mcp_response = await mcp_service.process_message(
-                            message=user_message,
-                            influencer_id=influencer_id or ""
-                        )
-                        
-                        if mcp_response and mcp_response.get("response"):
-                            mcp_result = mcp_response["response"]
-                            logger.info(f"[WS] ✅ MCP 처리 성공")
+                        if mcp_response:
+                            mcp_result = mcp_response
+                            logger.info(f"[WS] ✅ MCP 처리 성공, 사용된 도구: {tools_used}")
+                            # MCP 사용 정보를 클라이언트에 전송
+                            await websocket.send_text(
+                                json.dumps({
+                                    "type": "mcp_used",
+                                    "tools": tools_used,
+                                    "message": "MCP 도구를 사용하여 답변을 생성 중입니다."
+                                })
+                            )
                         else:
-                            logger.info(f"[WS] ❌ MCP 처리 실패 또는 도구 불필요, SLLM으로 전환")
-                    except Exception as e:
-                        logger.error(f"[WS] MCP 처리 중 오류: {e}")
-                    
-                    # 최종 메시지 구성
-                    final_prompt = enhanced_message
-                    
-                    if mcp_result:
-                        # MCP 결과가 있으면 도구 결과 기반 응답 생성
-                        final_prompt = f"사용자 질문: {user_message}\n도구 결과: {mcp_result}\n위 정보를 바탕으로 답변해 주세요."
-                    # else: enhanced_message (히스토리 포함된 원본 메시지) 사용
-                """
+                            logger.info(f"[WS] MCP 처리 없음 - 일반 LLM으로 처리")
+                    else:
+                        logger.info(f"[WS] 할당된 MCP 서버가 없음 - 일반 LLM으로 처리")
+                except Exception as e:
+                    logger.error(f"[WS] MCP 처리 중 오류: {e}")
+                    import traceback
+                    logger.error(f"[WS] MCP 오류 상세: {traceback.format_exc()}")
                 
-                # MCP 없이 직접 처리
-                final_prompt = enhanced_message
+                # 최종 메시지 구성
+                if mcp_result:
+                    # MCP 결과가 있으면 그대로 사용 (이미 자연어 응답)
+                    final_prompt = mcp_result
+                    # MCP 응답은 이미 완성된 형태이므로 바로 전송
+                    await websocket.send_text(
+                        json.dumps({"type": "token", "content": mcp_result})
+                    )
+                    await websocket.send_text(
+                        json.dumps({"type": "complete", "content": ""})
+                    )
+                    full_response = mcp_result
+                    
+                    # 사용자 메시지와 AI 응답 저장
+                    if current_session_id:
+                        try:
+                            # 사용자 메시지 저장
+                            chat_message_service.add_message_to_session(
+                                session_id=current_session_id,
+                                influencer_id=influencer_id or "default",
+                                message_content=user_message,
+                                message_type="user",
+                            )
+                            # AI 응답 저장  
+                            chat_message_service.add_message_to_session(
+                                session_id=current_session_id,
+                                influencer_id=influencer_id or "default",
+                                message_content=full_response,
+                                message_type="ai",
+                            )
+                            logger.info(
+                                f"[WS] MCP 응답 세션 저장 완료: session_id={current_session_id}"
+                            )
+                        except Exception as e:
+                            logger.error(f"[WS] MCP 응답 세션 저장 실패: {e}")
+                    
+                    # TTS 생성 (MCP 응답에 대해서도)
+                    if full_response.strip():
+                        asyncio.create_task(
+                            _process_tts_async(
+                                websocket, 
+                                full_response, 
+                                influencer_id if influencer_id else "default"
+                            )
+                        )
+                    
+                    # MCP 응답은 여기서 처리 완료이므로 continue
+                    continue
+                else:
+                    # MCP 결과가 없으면 기존 로직대로 enhanced_message 사용
+                    final_prompt = enhanced_message
                 
                 system_prompt = (
                     str(influencer.system_prompt)

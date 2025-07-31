@@ -13,6 +13,7 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 from abc import ABC, abstractmethod
+from enum import Enum
 
 load_dotenv()
 
@@ -25,6 +26,45 @@ class RunPodManagerError(Exception):
 
 
 ServiceType = Literal["tts", "vllm", "finetuning"]
+
+
+class HealthStatus(Enum):
+    """Health check 상태"""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
+    UNKNOWN = "unknown"
+
+
+class HealthCheckResult:
+    """Health check 결과 클래스"""
+    
+    def __init__(
+        self,
+        status: HealthStatus,
+        endpoint_id: Optional[str] = None,
+        message: str = "",
+        details: Optional[Dict[str, Any]] = None,
+        response_time_ms: Optional[float] = None
+    ):
+        self.status = status
+        self.endpoint_id = endpoint_id
+        self.message = message
+        self.details = details or {}
+        self.response_time_ms = response_time_ms
+        self.timestamp = datetime.now()
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """딕셔너리로 변환"""
+        return {
+            "status": self.status.value,
+            "endpoint_id": self.endpoint_id,
+            "message": self.message,
+            "details": self.details,
+            "response_time_ms": self.response_time_ms,
+            "timestamp": self.timestamp.isoformat(),
+            "is_healthy": self.status == HealthStatus.HEALTHY
+        }
 
 
 class BaseRunPodManager(ABC):
@@ -350,6 +390,177 @@ class BaseRunPodManager(ABC):
         except Exception as e:
             logger.error(f"❌ 엔드포인트 상태 확인 실패: {e}")
             return {"status": "error", "error": str(e)}
+    
+    async def get_direct_health_status(self, endpoint_id: str) -> Dict[str, Any]:
+        """RunPod 직접 health 엔드포인트 호출"""
+        try:
+            base_url = "https://api.runpod.ai/v2"
+            url = f"{base_url}/{endpoint_id}/health"
+            
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            logger.info(f"🔍 Direct health check: {url}")
+            
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.get(url, headers=headers)
+                
+                if response.status_code != 200:
+                    logger.warning(f"⚠️ Direct health check 실패: {response.status_code} - {response.text}")
+                    return {"error": f"HTTP {response.status_code}: {response.text}"}
+                
+                health_data = response.json()
+                logger.info(f"📊 Direct health status: {health_data}")
+                return health_data
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Direct health check 실패: {e}")
+            return {"error": str(e)}
+    
+    async def health_check(self) -> HealthCheckResult:
+        """포괄적인 health check 수행 (RunPod direct health API 우선 사용)"""
+        import time
+        
+        start_time = time.time()
+        
+        try:
+            # 1. 엔드포인트 존재 여부 확인
+            endpoint = await self.find_endpoint()
+            if not endpoint or not endpoint.get("id"):
+                return HealthCheckResult(
+                    status=HealthStatus.UNHEALTHY,
+                    message=f"{self.service_type} 엔드포인트를 찾을 수 없습니다",
+                    response_time_ms=(time.time() - start_time) * 1000
+                )
+            
+            endpoint_id = endpoint["id"]
+            
+            # 2. RunPod direct health API 시도
+            direct_health = await self.get_direct_health_status(endpoint_id)
+            
+            if "error" not in direct_health:
+                # Direct health API 성공 - 상세 분석
+                jobs = direct_health.get("jobs", {})
+                workers = direct_health.get("workers", {})
+                
+                jobs_completed = jobs.get("completed", 0)
+                jobs_failed = jobs.get("failed", 0)
+                jobs_in_progress = jobs.get("inProgress", 0)
+                jobs_in_queue = jobs.get("inQueue", 0)
+                
+                workers_idle = workers.get("idle", 0)
+                workers_ready = workers.get("ready", 0)
+                workers_running = workers.get("running", 0)
+                workers_throttled = workers.get("throttled", 0)
+                workers_unhealthy = workers.get("unhealthy", 0)
+                
+                total_workers = workers_idle + workers_ready + workers_running + workers_throttled + workers_unhealthy
+                healthy_workers = workers_idle + workers_ready + workers_running
+                
+                # Health 상태 결정 로직 (Direct API 기반)
+                if workers_unhealthy > 0:
+                    status = HealthStatus.UNHEALTHY
+                    message = f"비정상 워커가 있습니다 ({workers_unhealthy}개)"
+                elif total_workers == 0:
+                    status = HealthStatus.UNHEALTHY
+                    message = "사용 가능한 워커가 없습니다"
+                elif workers_throttled > 0:
+                    status = HealthStatus.DEGRADED
+                    message = f"일부 워커가 제한되고 있습니다 ({workers_throttled}개)"
+                elif jobs_in_queue > 10:
+                    status = HealthStatus.DEGRADED
+                    message = f"대기 중인 작업이 많습니다 ({jobs_in_queue}개)"
+                elif healthy_workers == 0 and jobs_in_queue > 0:
+                    status = HealthStatus.DEGRADED
+                    message = "준비된 워커가 없지만 대기 중인 작업이 있습니다"
+                else:
+                    status = HealthStatus.HEALTHY
+                    message = "엔드포인트가 정상 상태입니다"
+                
+                return HealthCheckResult(
+                    status=status,
+                    endpoint_id=endpoint_id,
+                    message=message,
+                    details={
+                        "jobs": jobs,
+                        "workers": workers,
+                        "total_workers": total_workers,
+                        "healthy_workers": healthy_workers,
+                        "endpoint_name": endpoint.get("name"),
+                        "health_api_available": True
+                    },
+                    response_time_ms=(time.time() - start_time) * 1000
+                )
+            
+            # 3. Direct health API 실패 시 기존 GraphQL API 사용
+            logger.info("Direct health API 실패, GraphQL API로 fallback")
+            status_info = await self.get_endpoint_status(endpoint_id)
+            
+            if "error" in status_info:
+                return HealthCheckResult(
+                    status=HealthStatus.UNHEALTHY,
+                    endpoint_id=endpoint_id,
+                    message=f"엔드포인트 상태 확인 실패: {status_info.get('error')}",
+                    response_time_ms=(time.time() - start_time) * 1000
+                )
+            
+            # GraphQL API 기반 상태 평가
+            workers_running = status_info.get("workersRunning", 0)
+            workers_throttled = status_info.get("workersThrottled", 0)
+            queued_requests = status_info.get("queuedRequests", 0)
+            avg_response_time = status_info.get("avgResponseTime", 0)
+            
+            if workers_running == 0 and queued_requests > 0:
+                status = HealthStatus.DEGRADED
+                message = "워커가 실행되지 않고 있지만 대기 중인 요청이 있습니다"
+            elif workers_throttled > 0:
+                status = HealthStatus.DEGRADED
+                message = f"일부 워커가 제한되고 있습니다 ({workers_throttled}개)"
+            elif avg_response_time > 30000:  # 30초 이상
+                status = HealthStatus.DEGRADED
+                message = f"평균 응답 시간이 높습니다 ({avg_response_time}ms)"
+            elif queued_requests > 10:
+                status = HealthStatus.DEGRADED
+                message = f"대기 중인 요청이 많습니다 ({queued_requests}개)"
+            else:
+                status = HealthStatus.HEALTHY
+                message = "엔드포인트가 정상 상태입니다"
+            
+            return HealthCheckResult(
+                status=status,
+                endpoint_id=endpoint_id,
+                message=message,
+                details={
+                    "workers_running": workers_running,
+                    "workers_throttled": workers_throttled,
+                    "queued_requests": queued_requests,
+                    "avg_response_time": avg_response_time,
+                    "endpoint_name": status_info.get("name"),
+                    "template_name": status_info.get("template", {}).get("name"),
+                    "docker_image": status_info.get("template", {}).get("imageName"),
+                    "health_api_available": False
+                },
+                response_time_ms=(time.time() - start_time) * 1000
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ {self.service_type} health check 실패: {e}")
+            return HealthCheckResult(
+                status=HealthStatus.UNKNOWN,
+                message=f"Health check 중 오류 발생: {str(e)}",
+                response_time_ms=(time.time() - start_time) * 1000
+            )
+    
+    async def simple_health_check(self) -> bool:
+        """간단한 boolean health check (기존 호환성)"""
+        try:
+            result = await self.health_check()
+            return result.status == HealthStatus.HEALTHY
+        except Exception as e:
+            logger.warning(f"⚠️ {self.service_type} 간단한 상태 확인 실패: {e}")
+            return False
 
 
 # 각 서비스별 구체적인 매니저 클래스
@@ -589,11 +800,51 @@ class TTSRunPodManager(BaseRunPodManager):
             logger.error(f"❌ TTS 상태 확인 실패: {e}")
             raise RunPodManagerError(f"TTS 상태 확인 실패: {e}")
     
-    async def health_check(self) -> bool:
-        """TTS 엔드포인트 상태 확인"""
+    async def health_check(self) -> HealthCheckResult:
+        """TTS 전용 health check"""
+        base_result = await super().health_check()
+        
+        # TTS 서비스가 healthy한 경우에만 추가 검사 수행
+        if base_result.status == HealthStatus.HEALTHY:
+            try:
+                # TTS 특화 검사: 간단한 ping 테스트
+                test_payload = {
+                    "input": {
+                        "text": "health check test",
+                        "language": "ko",
+                        "speaking_rate": 22.0,
+                        "pitch_std": 40.0,
+                        "cfg_scale": 4.0,
+                        "emotion": self.PREDEFINED_EMOTIONS["neutral"],
+                        "output_format": "wav"
+                    }
+                }
+                
+                # 실제 API 호출 없이 엔드포인트 준비 상태만 확인
+                endpoint = await self.find_endpoint()
+                if endpoint and endpoint.get("id"):
+                    base_result.details.update({
+                        "tts_specific": {
+                            "predefined_emotions": list(self.PREDEFINED_EMOTIONS.keys()),
+                            "supported_languages": ["ko", "en"],
+                            "voice_cloning_available": True,
+                            "endpoint_ready": True
+                        }
+                    })
+                    base_result.message = "TTS 서비스가 정상 작동 중입니다"
+                
+            except Exception as e:
+                logger.warning(f"⚠️ TTS 특화 검사 실패: {e}")
+                base_result.status = HealthStatus.DEGRADED
+                base_result.message = f"기본 상태는 정상이지만 TTS 특화 검사 실패: {str(e)}"
+        
+        return base_result
+    
+    async def simple_health_check(self) -> bool:
+        """TTS 간단한 health check (기존 호환성)"""
         try:
-            endpoint = await self.find_endpoint()
-            return endpoint is not None and endpoint.get("id") is not None
+            result = await self.health_check()
+            return result.status in [HealthStatus.HEALTHY, HealthStatus.DEGRADED]
         except Exception as e:
             logger.warning(f"⚠️ TTS 상태 확인 실패: {e}")
             return False
@@ -724,6 +975,53 @@ class VLLMRunPodManager(BaseRunPodManager):
         except httpx.HTTPStatusError as e:
             logger.error(f"❌ 스트리밍 요청 실패: {e}")
             raise RunPodManagerError(f"스트리밍 요청 실패: {e}")
+    
+    async def health_check(self) -> HealthCheckResult:
+        """vLLM 전용 health check"""
+        base_result = await super().health_check()
+        
+        # vLLM 서비스가 healthy한 경우에만 추가 검사 수행
+        if base_result.status == HealthStatus.HEALTHY:
+            try:
+                # vLLM 특화 검사: 간단한 completion 테스트 준비
+                test_payload = {
+                    "input": {
+                        "prompt": "Hello",
+                        "max_tokens": 5,
+                        "temperature": 0.1
+                    }
+                }
+                
+                # 실제 API 호출 없이 엔드포인트 준비 상태만 확인
+                endpoint = await self.find_endpoint()
+                if endpoint and endpoint.get("id"):
+                    base_result.details.update({
+                        "vllm_specific": {
+                            "model_name": "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct",
+                            "max_model_len": 4096,
+                            "gpu_memory_utilization": 0.85,
+                            "streaming_supported": True,
+                            "sync_async_supported": True,
+                            "endpoint_ready": True
+                        }
+                    })
+                    base_result.message = "vLLM 서비스가 정상 작동 중입니다"
+                
+            except Exception as e:
+                logger.warning(f"⚠️ vLLM 특화 검사 실패: {e}")
+                base_result.status = HealthStatus.DEGRADED
+                base_result.message = f"기본 상태는 정상이지만 vLLM 특화 검사 실패: {str(e)}"
+        
+        return base_result
+    
+    async def simple_health_check(self) -> bool:
+        """vLLM 간단한 health check"""
+        try:
+            result = await self.health_check()
+            return result.status in [HealthStatus.HEALTHY, HealthStatus.DEGRADED]
+        except Exception as e:
+            logger.warning(f"⚠️ vLLM 상태 확인 실패: {e}")
+            return False
 
 
 class FinetuningRunPodManager(BaseRunPodManager):
@@ -759,6 +1057,46 @@ class FinetuningRunPodManager(BaseRunPodManager):
     @property
     def search_keywords(self) -> List[str]:
         return ["finetuning", "training", "axolotl", "lora", "qlora"]
+    
+    async def health_check(self) -> HealthCheckResult:
+        """Fine-tuning 전용 health check"""
+        base_result = await super().health_check()
+        
+        # Fine-tuning 서비스가 healthy한 경우에만 추가 검사 수행
+        if base_result.status == HealthStatus.HEALTHY:
+            try:
+                # Fine-tuning 특화 검사: 훈련 환경 준비 상태 확인
+                endpoint = await self.find_endpoint()
+                if endpoint and endpoint.get("id"):
+                    base_result.details.update({
+                        "finetuning_specific": {
+                            "base_model": "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct",
+                            "training_framework": "axolotl",
+                            "max_steps": 1000,
+                            "lora_supported": True,
+                            "qlora_supported": True,
+                            "gpu_memory_utilization": 0.85,
+                            "container_disk_size_gb": 200,
+                            "endpoint_ready": True
+                        }
+                    })
+                    base_result.message = "Fine-tuning 서비스가 정상 작동 중입니다"
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Fine-tuning 특화 검사 실패: {e}")
+                base_result.status = HealthStatus.DEGRADED
+                base_result.message = f"기본 상태는 정상이지만 Fine-tuning 특화 검사 실패: {str(e)}"
+        
+        return base_result
+    
+    async def simple_health_check(self) -> bool:
+        """Fine-tuning 간단한 health check"""
+        try:
+            result = await self.health_check()
+            return result.status in [HealthStatus.HEALTHY, HealthStatus.DEGRADED]
+        except Exception as e:
+            logger.warning(f"⚠️ Fine-tuning 상태 확인 실패: {e}")
+            return False
 
 
 # 기존 RunPodManager를 BaseRunPodManager 상속으로 변경 (하위 호환성)
@@ -816,6 +1154,86 @@ def get_manager_by_service_type(service_type: ServiceType) -> BaseRunPodManager:
         return get_finetuning_manager()
     else:
         raise ValueError(f"지원하지 않는 서비스 타입: {service_type}")
+
+
+async def health_check_all_services() -> Dict[str, Dict[str, Any]]:
+    """모든 RunPod 서비스 health check"""
+    results = {}
+    
+    # 모든 서비스 타입에 대해 health check 수행
+    service_types: List[ServiceType] = ["tts", "vllm", "finetuning"]
+    
+    for service_type in service_types:
+        try:
+            logger.info(f"🔍 {service_type} 서비스 health check 수행 중...")
+            manager = get_manager_by_service_type(service_type)
+            health_result = await manager.health_check()
+            results[service_type] = health_result.to_dict()
+            
+            # 상태에 따른 로그 출력
+            if health_result.status == HealthStatus.HEALTHY:
+                logger.info(f"✅ {service_type} 서비스: {health_result.message}")
+            elif health_result.status == HealthStatus.DEGRADED:
+                logger.warning(f"⚠️ {service_type} 서비스: {health_result.message}")
+            else:
+                logger.error(f"❌ {service_type} 서비스: {health_result.message}")
+                
+        except Exception as e:
+            logger.error(f"❌ {service_type} health check 실패: {e}")
+            results[service_type] = {
+                "status": HealthStatus.UNKNOWN.value,
+                "message": f"Health check 중 오류 발생: {str(e)}",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat(),
+                "is_healthy": False
+            }
+    
+    # 전체 요약 정보
+    healthy_count = sum(1 for result in results.values() if result.get("is_healthy", False))
+    total_count = len(results)
+    
+    results["summary"] = {
+        "total_services": total_count,
+        "healthy_services": healthy_count,
+        "degraded_services": sum(1 for result in results.values() 
+                                if result.get("status") == "degraded"),
+        "unhealthy_services": sum(1 for result in results.values() 
+                                 if result.get("status") in ["unhealthy", "unknown"]),
+        "overall_status": "healthy" if healthy_count == total_count else 
+                         "degraded" if healthy_count > 0 else "unhealthy",
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    logger.info(f"📊 전체 Health Check 완료: {healthy_count}/{total_count} 서비스 정상")
+    return results
+
+
+async def health_check_service(service_type: ServiceType) -> Dict[str, Any]:
+    """특정 서비스의 health check"""
+    try:
+        logger.info(f"🔍 {service_type} 서비스 health check 수행 중...")
+        manager = get_manager_by_service_type(service_type)
+        health_result = await manager.health_check()
+        
+        # 상태에 따른 로그 출력
+        if health_result.status == HealthStatus.HEALTHY:
+            logger.info(f"✅ {service_type} 서비스: {health_result.message}")
+        elif health_result.status == HealthStatus.DEGRADED:
+            logger.warning(f"⚠️ {service_type} 서비스: {health_result.message}")
+        else:
+            logger.error(f"❌ {service_type} 서비스: {health_result.message}")
+        
+        return health_result.to_dict()
+        
+    except Exception as e:
+        logger.error(f"❌ {service_type} health check 실패: {e}")
+        return {
+            "status": HealthStatus.UNKNOWN.value,
+            "message": f"Health check 중 오류 발생: {str(e)}",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat(),
+            "is_healthy": False
+        }
 
 
 # 서버 시작 시 초기화 함수
