@@ -92,16 +92,30 @@ async def process_single_influencer(
         
         # vLLM 매니저로 응답 생성 요청
         logger.info(f"Generating response for {influencer_info.influencer_id} using vLLM Manager")
-        result = await vllm_manager.generate_text(
-            prompt=message,
-            lora_adapter=str(influencer_info.influencer_id),
-            hf_repo=adapter_repo,
-            hf_token=hf_token,
-            system_message=system_prompt,
-            max_tokens=150,
-            temperature=0.7,
-            stream=False
-        )
+        
+        # 메시지 구성
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": message})
+        
+        # RunPod vLLM worker에 맞는 페이로드 구성
+        payload = {
+            "input": {
+                "messages": messages,
+                "max_tokens": 150,
+                "temperature": 0.7,
+                "stream": False,
+                "lora_adapter": str(influencer_info.influencer_id),
+                "hf_repo": adapter_repo,
+                "hf_token": hf_token
+            }
+        }
+        
+        logger.info(f"🎯 LoRA 어댑터 설정: {influencer_info.influencer_id} from {adapter_repo}")
+        
+        # RunPod runsync 메서드 사용
+        result = await vllm_manager.runsync(payload)
         
         # 응답 추출
         if result.get("status") == "completed" and result.get("output"):
@@ -236,20 +250,6 @@ async def multi_chat(request: MultiChatRequest, db: Session = Depends(get_db), c
     
     response = {"results": results}
     logger.info(f"Multi-chat response completed with {len(results)} responses")
+    logger.info(f"Response: {response}")
     return response
 
-
-# 해당 형식으로 POST 요청 보내야함
-# {
-#   "influencers": [
-#     {
-#       "influencer_id": "string",
-#       "influencer_model_repo": "string"
-#     },
-#     {
-#       "influencer_id": "string",
-#       "influencer_model_repo": "string"
-#     }
-#   ],
-#   "message": "string"
-# }

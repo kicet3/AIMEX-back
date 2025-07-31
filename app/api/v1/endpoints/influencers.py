@@ -1912,16 +1912,27 @@ async def chat_with_influencer(
                                 str(hf_token_manage.hf_token_value)
                             )
 
+                    # 메시지 구성
+                    messages = []
+                    if system_message:
+                        messages.append({"role": "system", "content": system_message})
+                    messages.append({"role": "user", "content": request.message})
+                    
+                    # RunPod vLLM worker에 맞는 페이로드 구성
+                    payload = {
+                        "input": {
+                            "messages": messages,
+                            "max_tokens": 512,
+                            "temperature": 0.7,
+                            "stream": False,
+                            "lora_adapter": str(api_key.influencer_id),
+                            "hf_repo": model_id,
+                            "hf_token": hf_token
+                        }
+                    }
+                    
                     # vLLM 매니저로 응답 생성
-                    result = await vllm_manager.generate_text(
-                        prompt=request.message,
-                        lora_adapter=str(api_key.influencer_id),
-                        hf_repo=model_id,  # HuggingFace repository 경로
-                        hf_token=hf_token,  # HF 토큰
-                        system_message=system_message,
-                        max_tokens=512,
-                        stream=False
-                    )
+                    result = await vllm_manager.runsync(payload)
 
                     # 응답 텍스트 추출 (간소화된 형식)
                     if result.get("status") == "completed":

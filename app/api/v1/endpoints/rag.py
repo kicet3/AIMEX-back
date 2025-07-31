@@ -387,18 +387,28 @@ async def chat_gpu(chat_request: ChatRequest, db: Session = Depends(get_db)):
 
 답변:"""
                 
+                # 메시지 구성
+                messages = []
+                if system_message:
+                    messages.append({"role": "system", "content": system_message})
+                messages.append({"role": "user", "content": prompt})
+                
+                # RunPod vLLM worker에 맞는 페이로드 구성
+                payload = {
+                    "input": {
+                        "messages": messages,
+                        "max_tokens": max_tokens,
+                        "temperature": 0.7,
+                        "stream": False,
+                        "lora_adapter": str(influencer.influencer_id),
+                        "hf_repo": str(influencer.influencer_model_repo),
+                        "hf_token": hf_token
+                    }
+                }
+                
                 # vLLM 매니저로 텍스트 생성
                 vllm_manager = get_vllm_manager()
-                result = await vllm_manager.generate_text(
-                    prompt=prompt,
-                    lora_adapter=str(influencer.influencer_id),
-                    hf_repo=str(influencer.influencer_model_repo),
-                    hf_token=hf_token,
-                    system_message=system_message,
-                    temperature=0.7,
-                    max_tokens=max_tokens,
-                    stream=False
-                )
+                result = await vllm_manager.runsync(payload)
                 
                 # 응답 처리
                 if result.get("status") == "completed" and result.get("output"):

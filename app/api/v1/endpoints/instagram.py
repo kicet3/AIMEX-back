@@ -549,16 +549,29 @@ async def generate_ai_response(message_text: str, influencer: AIInfluencer, send
             else:
                 logger.info(f"🤖 기본 AI 모델로 응답 생성")
             
+            # 메시지 구성
+            messages = []
+            if system_message:
+                messages.append({"role": "system", "content": system_message})
+            messages.append({"role": "user", "content": message_text})
+            
+            # RunPod vLLM worker에 맞는 페이로드 구성
+            payload = {
+                "input": {
+                    "messages": messages,
+                    "max_tokens": 300,
+                    "temperature": 0.7,
+                    "stream": False
+                }
+            }
+            
+            # LoRA 어댑터가 있는 경우에만 추가
+            if model_repo:
+                payload["input"]["lora_adapter"] = str(model_repo)
+                payload["input"]["hf_repo"] = model_repo
+            
             # vLLM 매니저로 응답 생성 요청
-            result = await vllm_manager.generate_text(
-                prompt=message_text,
-                lora_adapter=str(model_repo) if model_repo else None,
-                hf_repo=model_repo if model_repo else None,  # HuggingFace repository 경로
-                system_message=system_message,
-                max_tokens=300,
-                temperature=0.7,
-                stream=False
-            )
+            result = await vllm_manager.runsync(payload)
             
             # 결과에서 텍스트 추출
             if result.get("status") == "completed" and result.get("output"):

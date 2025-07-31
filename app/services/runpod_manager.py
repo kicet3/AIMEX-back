@@ -1022,6 +1022,7 @@ class VLLMRunPodManager(BaseRunPodManager):
         except Exception as e:
             logger.warning(f"⚠️ vLLM 상태 확인 실패: {e}")
             return False
+    
 
 
 class FinetuningRunPodManager(BaseRunPodManager):
