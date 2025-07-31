@@ -147,6 +147,7 @@ class MCPServerManager:
     def __init__(self, db: Session = None):
         self.processes: Dict[str, subprocess.Popen] = {}
         self.server_configs: Dict[str, dict] = {}
+        self.server_ports: Dict[str, int] = {}  # 서버별 포트 매핑
         self.db = db
         self._load_servers_from_database()
 
@@ -256,13 +257,48 @@ class MCPServerManager:
         """포트가 사용 중인지 확인합니다."""
         import socket
 
+        # IPv4만 확인 (MCP 서버는 IPv4에서만 실행)
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.settimeout(1)
-                result = sock.connect_ex(("localhost", port))
-                return result == 0
-        except Exception:
-            return False
+                # 바인딩을 시도하여 포트 사용 가능 여부 확인
+                sock.bind(("127.0.0.1", port))
+                logger.debug(f"포트 {port}는 사용 가능합니다.")
+                return False
+        except socket.error:
+            logger.debug(f"포트 {port}가 127.0.0.1에서 사용 중입니다.")
+            return True
+        except Exception as e:
+            logger.debug(f"포트 {port} 확인 중 오류 발생: {e}")
+            return True  # 오류 발생 시 사용 중으로 간주
+
+    def _find_available_port(
+        self, start_port: int = 8001, max_attempts: int = 100
+    ) -> int:
+        """사용 가능한 포트를 찾습니다."""
+        import socket
+
+        for i in range(max_attempts):
+            test_port = start_port + i
+
+            # IPv4만 확인 (MCP 서버는 IPv4에서만 실행)
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(1)
+                    # 바인딩을 시도하여 포트 사용 가능 여부 확인
+                    sock.bind(("127.0.0.1", test_port))
+                    logger.debug(f"사용 가능한 포트 발견: {test_port}")
+                    return test_port
+            except socket.error:
+                # 포트가 사용 중이면 다음 포트 시도
+                continue
+            except Exception as e:
+                logger.debug(f"포트 {test_port} 확인 중 오류 발생: {e}")
+                continue
+
+        raise RuntimeError(
+            f"사용 가능한 포트를 찾을 수 없습니다. ({start_port}-{start_port + max_attempts - 1})"
+        )
 
     async def start_server(self, server_name: str):
         """특정 MCP 서버를 시작합니다."""
@@ -321,33 +357,32 @@ class MCPServerManager:
                 port = config.get("port")
                 if port is None:
                     # 환경변수에서 포트 가져오기
-                    port = os.environ.get("MCP_PORT", 8000)
-                    # 사용 가능한 포트 찾기
-                    base_port = int(port)
-                    for i in range(100):  # 8000-8099 범위에서 사용 가능한 포트 찾기
-                        test_port = base_port + i
-                        if not await self._is_port_in_use(test_port):
-                            port = test_port
-                            break
-                    else:
-                        logger.error(
-                            f"사용 가능한 포트를 찾을 수 없습니다. {server_name} 서버를 건너뜁니다."
+                    base_port = int(os.environ.get("MCP_PORT", 8001))
+                    try:
+                        # 사용 가능한 포트 찾기
+                        port = self._find_available_port(base_port, 100)
+                        # 서버별 포트 매핑 저장
+                        self.server_ports[server_name] = port
+                        logger.info(f"🔍 {server_name} 서버에 포트 {port} 할당됨")
+                    except RuntimeError as e:
+                        logger.error(f"❌ {e}. {server_name} 서버를 건너뜁니다.")
+                        return
+                else:
+                    # 설정된 포트가 사용 중인지 확인
+                    if await self._is_port_in_use(port):
+                        logger.warning(
+                            f"포트 {port}가 이미 사용 중입니다. {server_name} 서버를 건너뜁니다."
                         )
                         return
-
-                # 포트가 사용 중인지 확인
-                if await self._is_port_in_use(port):
-                    logger.warning(
-                        f"포트 {port}가 이미 사용 중입니다. {server_name} 서버를 건너뜁니다."
-                    )
-                    return
+                    # 서버별 포트 매핑 저장
+                    self.server_ports[server_name] = port
 
                 logger.info(f"{server_name} 서버를 포트 {port}에서 시작합니다...")
 
                 # 환경변수 설정
                 env = os.environ.copy()
                 env["MCP_PORT"] = str(port)
-                env["MCP_HOST"] = "0.0.0.0"
+                env["MCP_HOST"] = "127.0.0.1"  # IPv4만 사용
 
                 # 디버그 출력
                 logger.info(
@@ -480,25 +515,9 @@ class MCPServerManager:
                 f"🖥️ 외부 MCP 서버 시작 - OS: {os_info['system']} {os_info['release']}"
             )
 
-            # 외부 MCP 서버 설정
-            if server_name == "websearch":
-                # Exa Search MCP 서버 - OS별 명령어 경로 처리
-                npx_path = get_command_path("npx")
-                cmd = [
-                    npx_path,
-                    "-y",
-                    "@smithery/cli@latest",
-                    "run",
-                    "exa",
-                    "--key",
-                    "424b5510-2224-480b-a976-93ed248876ca",
-                    "--profile",
-                    "controversial-swallow-jyXJrS",
-                ]
-                logger.info(f"🔍 Exa Search MCP 서버 명령어: {' '.join(cmd)}")
-            else:
-                logger.error(f"알 수 없는 외부 MCP 서버: {server_name}")
-                return
+            # 외부 MCP 서버 설정 - 동적으로 처리
+            logger.error(f"알 수 없는 외부 MCP 서버: {server_name}")
+            return
 
             # OS별 프로세스 실행 설정
             if os_info["is_windows"]:
@@ -618,6 +637,7 @@ class MCPServerManager:
                 "running": is_running,
                 "pid": pid,
                 "config": config,
+                "port": self.server_ports.get(server_name),
             }
 
         return status

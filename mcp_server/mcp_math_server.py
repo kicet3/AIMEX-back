@@ -155,10 +155,12 @@ async def lcm(a: int = None, b: int = None) -> str:
         b = 0
     if a == 0 or b == 0:
         return "0"
+
     def _gcd(x: int, y: int) -> int:
         while y:
             x, y = y, x % y
         return x
+
     gcd_val = _gcd(a, b)
     result = abs(a * b) // gcd_val
     return f"lcm({a}, {b}) = {result}"
@@ -192,12 +194,12 @@ if __name__ == "__main__":
     import uvicorn
 
     # 환경변수 설정
-    port = int(os.environ.get("MCP_PORT", 8003))
-    host = os.environ.get("MCP_HOST", "0.0.0.0")
+    port = int(os.environ.get("MCP_PORT", 8001))
+    host = os.environ.get("MCP_HOST", "127.0.0.1")  # IPv4만 사용
 
     print(f"Math Server를 포트 {port}에서 시작합니다...")
     print(f"MCP_PORT: {port}")
     print(f"MCP_HOST: {host}")
 
-    # FastMCP 서버를 uvicorn으로 실행 (올바른 속성 사용)
+    # FastMCP 서버를 uvicorn으로 실행 (IPv4만 사용)
     uvicorn.run(mcp.streamable_http_app, host=host, port=port)

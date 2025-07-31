@@ -82,7 +82,10 @@ class MCPClientService:
 
             try:
                 from app.services.mcp_server_manager import mcp_server_manager
-                from app.services.mcp_server_manager import get_command_path, normalize_path
+                from app.services.mcp_server_manager import (
+                    get_command_path,
+                    normalize_path,
+                )
 
                 # MCP 서버들이 실행될 때까지 대기
                 logger.info("🔄 MCP 서버들이 실행될 때까지 대기 중...")
@@ -105,7 +108,7 @@ class MCPClientService:
                             # OS별 명령어 경로 처리
                             command = get_command_path(config["command"])
                             args = config["args"]
-                            
+
                             # args의 경로도 정규화
                             normalized_args = []
                             for arg in args:
@@ -113,7 +116,7 @@ class MCPClientService:
                                     normalized_args.append(normalize_path(arg))
                                 else:
                                     normalized_args.append(arg)
-                            
+
                             client_config[server_name] = {
                                 "command": command,
                                 "args": normalized_args,
@@ -126,7 +129,11 @@ class MCPClientService:
                         elif "url" in config:
                             # SSE 기반 서버 - streamable_http 통신
                             # URL 정규화
-                            url = normalize_path(config["url"]) if "/" in config["url"] else config["url"]
+                            url = (
+                                normalize_path(config["url"])
+                                if "/" in config["url"]
+                                else config["url"]
+                            )
                             client_config[server_name] = {
                                 "url": url,
                                 "transport": "streamable_http",
@@ -283,7 +290,6 @@ class MCPClientService:
             server_urls = {
                 "math": "http://localhost:8003",
                 "weather": "http://localhost:8005",
-                "websearch": "https://server.smithery.ai/exa",
             }
 
             return server_urls.get(server_name, "")
