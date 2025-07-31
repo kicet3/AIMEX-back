@@ -15,6 +15,7 @@ import logging
 import asyncio
 import json
 import io
+import time
 from datetime import datetime
 from app.database import get_async_db
 
@@ -101,7 +102,24 @@ async def generate_image(
         # 첫 번째 그룹을 기본 그룹으로 사용
         group_id = user.teams[0].group_id
         
+        # WebSocket 매니저 가져오기
+        from app.websocket.manager import get_ws_manager
+        ws_manager = get_ws_manager()
+        
+        # 진행 상태 전송 헬퍼 함수
+        async def send_progress(status: str, progress: int, message: str):
+            if ws_manager.is_connected(user_id):
+                await ws_manager.send_message(user_id, {
+                    "type": "generation_progress",
+                    "data": {
+                        "status": status,
+                        "progress": progress,
+                        "message": message
+                    }
+                })
+        
         # 2. 세션 확인 및 검증
+        await send_progress("validating", 5, "세션 상태 확인 중...")
         user_session_service = get_user_session_service()
         session_started = await user_session_service.start_image_generation(user_id, db)
         
@@ -112,6 +130,7 @@ async def generate_image(
             )
         
         # 3. OpenAI로 프롬프트 최적화
+        await send_progress("optimizing", 20, "프롬프트 최적화 중...")
         try:
             prompt_service = get_prompt_optimization_service()
             
@@ -158,6 +177,7 @@ async def generate_image(
             logger.info(f"🎨 인종 스타일 설정: {ethnicity_style} -> {lora_settings}")
         
         # 5. Flux 워크플로우로 이미지 생성
+        await send_progress("generating", 50, "이미지 생성 중... (약 30초 소요)")
         try:
             flux_service = get_comfyui_flux_service()
             
@@ -205,6 +225,7 @@ async def generate_image(
                 raise Exception("Flux 워크플로우 실행 실패")
             
             # 생성된 이미지 다운로드
+            await send_progress("downloading", 70, "생성된 이미지 다운로드 중...")
             image_data = await flux_service.download_generated_image(
                 comfyui_endpoint=comfyui_endpoint,
                 image_info=flux_result
@@ -222,6 +243,7 @@ async def generate_image(
             raise HTTPException(status_code=500, detail=f"이미지 생성 실패: {str(e)}")
         
         # 6. S3에 이미지 업로드
+        await send_progress("uploading", 85, "이미지 저장 중...")
         try:
             s3_service = get_s3_service()
             
@@ -252,6 +274,7 @@ async def generate_image(
             raise HTTPException(status_code=500, detail=f"이미지 저장 실패: {str(e)}")
         
         # 7. 이미지 메타데이터 DB 저장
+        await send_progress("saving", 95, "데이터베이스 저장 중...")
         try:
             # IMAGE_STORAGE 테이블에 저장
             image_storage_service = get_image_storage_service()
@@ -274,6 +297,25 @@ async def generate_image(
         generation_time = time.time() - start_time
         
         logger.info(f"Image generation completed for user {user_id}, time: {generation_time:.2f}s")
+        
+        # WebSocket으로 생성 완료 메시지 전송
+        await send_progress("completed", 100, "이미지 생성 완료!")
+        
+        if ws_manager.is_connected(user_id):
+            await ws_manager.send_message(user_id, {
+                "type": "generation_complete",
+                "data": {
+                    "success": True,
+                    "storage_id": storage_id,
+                    "s3_url": s3_url,
+                    "width": request.width,
+                    "height": request.height,
+                    "prompt": request.prompt,  # 원본 프롬프트
+                    "optimized_prompt": optimized_prompt,  # 최적화된 프롬프트
+                    "generation_time": generation_time,
+                    "session_status": session_status or {}
+                }
+            })
         
         return ImageGenerationResponse(
             success=True,

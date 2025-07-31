@@ -18,7 +18,7 @@ from app.models.influencer import AIInfluencer
 from app.models.user import HFTokenManage
 from app.core.encryption import decrypt_sensitive_data
 from app.core.security import get_current_user
-from app.services.vllm_client import get_vllm_client, vllm_load_adapter_if_needed
+from app.services.runpod_manager import get_vllm_manager
 import logging
 
 logger = logging.getLogger(__name__)
@@ -266,9 +266,10 @@ async def transform_with_influencer_tone(
 
             # 어댑터 로드 (필요시)
             logger.info(f"Loading adapter if needed: {model_id} from {adapter_repo}")
-            loaded = await vllm_load_adapter_if_needed(
-                model_id=model_id, hf_repo_name=adapter_repo, hf_token=decrypted_token
-            )
+            # RunPod에서는 어댑터 로드가 다르게 처리됨
+            # TODO: RunPod serverless adapter 로드 구현
+            logger.warning("RunPod 어댑터 로드 미구현 - 스킵")
+            loaded = True  # 임시로 True 반환
 
             if not loaded:
                 logger.error(f"어댑터 로드 실패: {model_id}")

@@ -4,7 +4,6 @@ from app.models.influencer import AIInfluencer, ModelMBTI, StylePreset, Influenc
 from app.schemas.influencer import AIInfluencerCreate, AIInfluencerUpdate
 from app.utils.data_mapping import DataMapper
 from fastapi import HTTPException, status
-from app.services.vllm_client import VLLMClient, VLLMServerConfig
 import uuid
 import logging
 from datetime import datetime
@@ -198,12 +197,7 @@ async def create_influencer(db: Session, user_id: str, influencer_data: AIInflue
         if not influencer_data.system_prompt and not final_system_prompt:
             logger.info("🔍 tone_data 분석을 통한 시스템 프롬프트 생성 시작")
             try:
-                # vLLM 클라이언트 생성
-                from app.core.config import settings
-                vllm_config = VLLMServerConfig(
-                    base_url=settings.VLLM_BASE_URL,
-                    timeout=getattr(settings, 'VLLM_TIMEOUT', 300)
-                )
+                
                 
                 # 캐릭터 정보 구성
                 character_info = {
@@ -216,8 +210,8 @@ async def create_influencer(db: Session, user_id: str, influencer_data: AIInflue
                 }
                 
                 # tone_data 분석
-                async with VLLMClient(vllm_config) as vllm_client:
-                    analysis_result = await vllm_client.analyze_tone_data(
+                async with RunPodClient() as runpod_client:
+                    analysis_result = await runpod_client.analyze_tone_data(
                         tone_data=influencer_data.tone_data,
                         character_info=character_info
                     )
@@ -324,8 +318,6 @@ async def update_influencer(
         if not influencer.chatbot_option and influencer.influencer_model_repo:
             logger.info(f"🤖 챗봇 옵션 활성화 감지 - LoRA 어댑터 로드 시작: {influencer.influencer_name}")
             
-            # vLLM에 LoRA 어댑터 로드
-            from app.services.vllm_client import vllm_load_adapter_if_needed
             from app.models.user import HFTokenManage
             
             # 허깅페이스 토큰 가져오기
@@ -339,7 +331,7 @@ async def update_influencer(
             
             # LoRA 어댑터 로드 (비동기 방식)
             try:
-                adapter_loaded = await vllm_load_adapter_if_needed(
+                adapter_loaded = await runpod_load_adapter_if_needed(
                     model_id=influencer.influencer_id,
                     hf_repo_name=influencer.influencer_model_repo,
                     hf_token=hf_token

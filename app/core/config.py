@@ -5,6 +5,7 @@ import secrets
 import os
 from dotenv import load_dotenv
 
+load_dotenv()
 
 class Settings(BaseSettings):
     # model_config는 .env 파일을 읽도록 설정합니다.

@@ -171,29 +171,22 @@ async def _load_vllm_adapter_for_influencer(influencer, db: Session):
         return False
     
     try:
-        # vLLM 클라이언트 및 어댑터 로드 함수 import
-        from app.services.vllm_client import vllm_load_adapter_if_needed
+        # RunPod는 동적으로 어댑터를 로드하므로 미리 로드할 필요 없음
         from app.services.hf_token_resolver import get_token_for_influencer
         
-        logger.info(f"📲 {influencer.influencer_name}: Instagram 연동 완료, vLLM 어댑터 로드 시작")
+        logger.info(f"📲 {influencer.influencer_name}: Instagram 연동 완료, RunPod에서 동적 로드됨")
         logger.info(f"   - 모델 리포지토리: {influencer.influencer_model_repo}")
         
-        # 허깅페이스 토큰 조회
+        # 허깅페이스 토큰 조회 (RunPod에서 사용하기 위해)
         hf_token, hf_username = await get_token_for_influencer(influencer, db)
         
-        # 어댑터 로드 요청
-        adapter_loaded = await vllm_load_adapter_if_needed(
-            model_id=str(influencer.influencer_id),  # 인플루언서 ID를 어댑터 식별자로 사용
-            hf_repo_name=influencer.influencer_model_repo,  # 실제 HuggingFace 레포지토리 경로
-            hf_token=hf_token
-        )
-        
-        if adapter_loaded:
-            logger.info(f"✅ {influencer.influencer_name}: vLLM 어댑터 로드 성공")
+        # RunPod는 요청 시 동적으로 로드하므로 여기서는 토큰 확인만
+        if hf_token:
+            logger.info(f"✅ {influencer.influencer_name}: HF 토큰 확인 완료, RunPod에서 사용 가능")
+            return True
         else:
-            logger.warning(f"⚠️ {influencer.influencer_name}: vLLM 어댑터 로드 실패")
-        
-        return adapter_loaded
+            logger.warning(f"⚠️ {influencer.influencer_name}: HF 토큰 없음")
+            return False
         
     except Exception as e:
         logger.error(f"❌ {influencer.influencer_name}: vLLM 어댑터 로드 중 오류 발생: {str(e)}")

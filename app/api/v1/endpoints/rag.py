@@ -37,6 +37,7 @@ class ChatRequest(BaseModel):
     """채팅 요청 스키마"""
 
     message: str = Field(..., description="사용자 메시지")
+    influencer_id: Optional[str] = Field(None, description="인플루언서 ID")
     similarity_threshold: float = Field(
         0.7, description="유사도 임계값"
     )  # 0.5에서 0.7로 높임
@@ -302,55 +303,157 @@ async def upload_document_gpu(
 
 
 @router.post("/chat_gpu", response_model=ChatResponse)
-async def chat_gpu(chat_request: ChatRequest):
-    """VLLM GPU 벡터 검색을 사용한 채팅 (단순화된 RAG 프로세서 기반)"""
+async def chat_gpu(chat_request: ChatRequest, db: Session = Depends(get_db)):
+    """VLLM GPU 벡터 검색을 사용한 채팅 (인플루언서 모델 지원)"""
     try:
         query = chat_request.message
+        influencer_id = chat_request.influencer_id
         top_k = 5  # Default value from ChatRequest
         similarity_threshold = chat_request.similarity_threshold
         include_sources = True  # Default value from ChatRequest
         max_tokens = chat_request.max_tokens
-        model = "gpt-4"  # Default value from ChatRequest
 
         logger.info(
-            f"🔍 단순화된 RAG 프로세서 시작: query='{query}', top_k={top_k}, similarity_threshold={similarity_threshold}"
+            f"🔍 RAG GPU 채팅 시작: query='{query}', influencer_id={influencer_id}, top_k={top_k}, similarity_threshold={similarity_threshold}"
         )
 
-        # 단순화된 RAG 프로세서 사용
-        response, sources, should_fallback_to_mcp = await process_with_rag(
-            message=query,
-            influencer_name="AI 어시스턴트",
-            system_message="당신은 제공된 참고 문서의 정확한 정보와 사실을 바탕으로 답변하는 AI 어시스턴트입니다.",
+        # 인플루언서 정보 조회 (influencer_id가 제공된 경우)
+        influencer = None
+        influencer_name = "AI 어시스턴트"
+        system_message = "당신은 제공된 참고 문서의 정확한 정보와 사실을 바탕으로 답변하는 AI 어시스턴트입니다."
+        
+        if influencer_id:
+            from app.models.influencer import AIInfluencer
+            influencer = (
+                db.query(AIInfluencer)
+                .filter(AIInfluencer.influencer_id == influencer_id)
+                .first()
+            )
+            
+            if influencer:
+                logger.info(f"✅ 인플루언서 조회 성공: {influencer.influencer_name}, model_repo={influencer.influencer_model_repo}")
+                influencer_name = str(influencer.influencer_name)
+                if influencer.system_prompt:
+                    system_message = str(influencer.system_prompt)
+            else:
+                logger.warning(f"⚠️ 인플루언서를 찾을 수 없음: {influencer_id}")
+
+        # RAG 서비스로 문서 검색
+        rag_service = get_rag_service()
+        search_results = await rag_service.vector_store.search_similar(
+            query=query,
+            top_k=top_k,
+            score_threshold=similarity_threshold
         )
 
-        if should_fallback_to_mcp:
-            logger.info("🔄 RAG 처리 실패 또는 문서 없음, MCP로 전환 필요")
+        if not search_results:
+            logger.info("❌ 임계값을 넘는 문서가 없음")
             return ChatResponse(
-                response="",  # 빈 응답으로 MCP 분기처리 유도
+                response="",
                 sources=[],
                 query=query,
                 search_results=[],
             )
 
-        if not response:
-            logger.info("❌ RAG에서 응답 생성 실패, MCP로 전환")
-            return ChatResponse(
-                response="",  # 빈 응답으로 MCP 분기처리 유도
-                sources=[],
-                query=query,
-                search_results=[],
+        logger.info(f"✅ 검색 완료: {len(search_results)}개 문서 발견")
+
+        # 가장 관련성 높은 문서 사용
+        best_document = search_results[0]
+        context = best_document.get("text", "")
+
+        # RunPod를 사용하여 응답 생성 (인플루언서 모델 사용)
+        if influencer and influencer.influencer_model_repo:
+            try:
+                from app.services.runpod_manager import get_vllm_manager
+                from app.services.hf_token_resolver import get_token_for_influencer
+                
+                # HF 토큰 가져오기
+                hf_token = None
+                hf_username = None
+                try:
+                    hf_token, hf_username = await get_token_for_influencer(influencer, db)
+                    if hf_token:
+                        logger.info(f"🔑 HF 토큰 사용 (user: {hf_username})")
+                except Exception as e:
+                    logger.warning(f"⚠️ HF 토큰 가져오기 실패: {e}")
+                
+                # 프롬프트 구성
+                prompt = f"""다음 문서 내용을 참고하여 사용자의 질문에 답변해주세요.
+
+문서 내용:
+{context}
+
+사용자 질문: {query}
+
+답변:"""
+                
+                # vLLM 매니저로 텍스트 생성
+                vllm_manager = get_vllm_manager()
+                result = await vllm_manager.generate_text(
+                    prompt=prompt,
+                    lora_adapter=str(influencer.influencer_id),
+                    hf_repo=str(influencer.influencer_model_repo),
+                    hf_token=hf_token,
+                    system_message=system_message,
+                    temperature=0.7,
+                    max_tokens=max_tokens,
+                    stream=False
+                )
+                
+                # 응답 처리
+                if result.get("status") == "completed" and result.get("output"):
+                    output = result["output"]
+                    if output.get("status") == "success":
+                        response = output.get("generated_text", "")
+                    else:
+                        response = "응답 생성에 실패했습니다."
+                else:
+                    response = "응답 생성에 실패했습니다."
+                    
+                logger.info(f"✅ RunPod 응답 생성 성공")
+                
+            except Exception as e:
+                logger.error(f"❌ RunPod 응답 생성 실패: {e}")
+                # OpenAI로 폴백
+                from app.services.openai_service_simple import OpenAIService
+                openai_service = OpenAIService()
+                response = await openai_service.openai_tool_selection(
+                    user_prompt=prompt,
+                    system_prompt=system_message,
+                )
+        else:
+            # 인플루언서 모델이 없는 경우 OpenAI 사용
+            from app.services.openai_service_simple import OpenAIService
+            openai_service = OpenAIService()
+            
+            prompt = f"""다음 문서 내용을 참고하여 사용자의 질문에 답변해주세요.
+
+문서 내용:
+{context}
+
+사용자 질문: {query}
+
+답변 요구사항:
+- 문서 내용을 바탕으로 정확하고 명확하게 답변
+- 문서에 없는 정보는 추가하지 않음
+- 자연스럽고 이해하기 쉽게 작성"""
+            
+            response = await openai_service.openai_tool_selection(
+                user_prompt=prompt,
+                system_prompt=system_message,
             )
 
         # 검색 결과를 딕셔너리로 변환
         search_results_dict = []
-        for source in sources:
-            search_results_dict.append(
-                {
-                    "text": source.get("text", ""),
-                    "score": source.get("score", 0),
-                    "metadata": source.get("metadata", {}),
-                }
-            )
+        sources = []
+        for result in search_results:
+            result_dict = {
+                "text": result.get("text", ""),
+                "score": result.get("score", 0),
+                "metadata": result.get("metadata", {}),
+            }
+            search_results_dict.append(result_dict)
+            sources.append(result_dict)
 
         logger.info(f"✅ RAG 응답 생성 완료: {len(sources)}개 문서 참조")
         return ChatResponse(
@@ -361,7 +464,7 @@ async def chat_gpu(chat_request: ChatRequest):
         )
 
     except Exception as e:
-        logger.error(f"❌ RAG 프로세서 처리 실패: {e}")
+        logger.error(f"❌ RAG GPU 채팅 처리 실패: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -9,6 +9,7 @@ from fastapi import (
     Form,
     Header,
 )
+from fastapi.responses import StreamingResponse
 
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -16,6 +17,8 @@ import os
 import logging
 import json
 import uuid
+import asyncio
+import time
 from app.database import get_db
 from app.schemas.influencer import (
     AIInfluencer as AIInfluencerSchema,
@@ -26,7 +29,6 @@ from app.schemas.influencer import (
     StylePresetCreate,
     StylePresetWithMBTI,
     ModelMBTI as ModelMBTISchema,
-    FinetuningWebhookRequest,
     ToneGenerationRequest,
     SystemPromptSaveRequest,
     APIKeyResponse,
@@ -35,7 +37,9 @@ from app.schemas.influencer import (
     APIKeyTestRequest,
     APIKeyTestResponse,
 )
+from app.schemas.finetuning import FineTuningResultRequest, FineTuningResultResponse
 from app.core.security import get_current_user
+from app.models.user import User
 from app.core.permissions import check_team_resource_permission
 from app.services.influencers.crud import (
     get_influencers_list,
@@ -77,6 +81,16 @@ import os
 import json
 from pydantic import BaseModel
 from app.models.influencer import APICallAggregation
+from app.services.qa_generation_service import get_qa_generation_service
+from app.schemas.influencer_qa import (
+    ToneGenerationResponse,
+    QAGenerationRequest,
+    QAGenerationResponse,
+    QABatchSubmitRequest,
+    QABatchStatusResponse,
+    QAProcessResultsRequest,
+    QAProcessResultsResponse
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1095,97 +1109,6 @@ async def handle_openai_batch_webhook(
         return {"error": f"웹훅 처리 실패: {str(e)}"}
 
 
-@router.post("/webhooks/finetuning-complete")
-async def handle_finetuning_webhook(
-    webhook_data: FinetuningWebhookRequest,
-    db: Session = Depends(get_db),
-):
-    """파인튜닝 완료 웹훅 처리"""
-    logger.info(
-        f"🎯 파인튜닝 웹훅 수신: task_id={webhook_data.task_id}, status={webhook_data.status}"
-    )
-
-    try:
-        # VLLM task_id로 먼저 찾고, 없으면 일반 task_id로 찾기
-        batch_key_entry = (
-            db.query(BatchKey)
-            .filter(BatchKey.vllm_task_id == webhook_data.task_id)
-            .first()
-        )
-
-        if not batch_key_entry:
-            # 하위 호환성을 위해 task_id로도 검색
-            batch_key_entry = (
-                db.query(BatchKey)
-                .filter(BatchKey.task_id == webhook_data.task_id)
-                .first()
-            )
-
-        if not batch_key_entry:
-            logger.warning(
-                f"⚠️ 해당 task_id를 가진 BatchKey를 찾을 수 없음: {webhook_data.task_id}"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="작업을 찾을 수 없습니다"
-            )
-
-        if webhook_data.status == "completed":
-            # 허깅페이스 URL에서 레포 경로만 추출
-            from app.utils.hf_utils import extract_hf_repo_path
-
-            hf_repo_path = extract_hf_repo_path(webhook_data.hf_model_url)
-
-            batch_key_entry.status = QAGenerationStatus.FINALIZED.value
-            batch_key_entry.hf_model_url = hf_repo_path  # 레포 경로만 저장
-            batch_key_entry.completed_at = datetime.now()
-            logger.info(
-                f"✅ 파인튜닝 완료: task_id={webhook_data.task_id}, 모델 레포={hf_repo_path}"
-            )
-
-            # AIInfluencer 모델 상태를 사용 가능으로 업데이트
-            influencer = (
-                db.query(AIInfluencer)
-                .filter(AIInfluencer.influencer_id == batch_key_entry.influencer_id)
-                .first()
-            )
-
-            if influencer:
-                influencer.learning_status = 1  # 1: 사용가능
-                if hf_repo_path:
-                    influencer.influencer_model_repo = hf_repo_path  # 레포 경로만 저장
-                logger.info(
-                    f"✅ 인플루언서 모델 상태 업데이트 완료: influencer_id={batch_key_entry.influencer_id}, status=사용 가능"
-                )
-        elif webhook_data.status == "failed":
-            batch_key_entry.status = QAGenerationStatus.FAILED.value
-            batch_key_entry.error_message = webhook_data.error_message
-            batch_key_entry.completed_at = datetime.now()
-            logger.error(
-                f"❌ 파인튜닝 실패: task_id={webhook_data.task_id}, 오류={webhook_data.error_message}"
-            )
-        else:
-            # 기타 상태 업데이트 (예: processing, validating 등)
-            batch_key_entry.status = webhook_data.status
-            logger.info(
-                f"🔄 파인튜닝 상태 업데이트: task_id={webhook_data.task_id}, 상태={webhook_data.status}"
-            )
-
-        db.commit()
-        return {
-            "message": "파인튜닝 웹훅 처리 완료",
-            "task_id": webhook_data.task_id,
-            "status": webhook_data.status,
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ 파인튜닝 웹훅 처리 중 오류: {str(e)}", exc_info=True)
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"파인튜닝 웹훅 처리 실패: {str(e)}",
-        )
 
 
 # 말투 생성 관련 API
@@ -1243,6 +1166,344 @@ async def _generate_question_for_character(
     )
 
     return response.choices[0].message.content.strip()
+
+
+# 통합 어투 생성 엔드포인트 (백엔드에서 직접 처리)
+@router.post("/{influencer_id}/generate-tone-variations", response_model=ToneGenerationResponse)
+async def generate_tone_variations_integrated(
+    influencer_id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    인플루언서의 어투 변형 생성 (백엔드 통합 버전)
+    vLLM의 /generate_qa_fast 로직을 백엔드에서 직접 처리
+    """
+    from app.schemas.influencer_qa import ToneGenerationResponse
+    
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID not found")
+    
+    # 인플루언서 존재 확인
+    influencer = await get_influencer_by_id(db, user_id, influencer_id)
+    if not influencer:
+        raise HTTPException(status_code=404, detail="인플루언서를 찾을 수 없습니다")
+    
+    # QA 생성 서비스를 활용하여 어투 생성
+    qa_service = get_qa_generation_service()
+    
+    # 캐릭터 프로필 생성
+    character_profile = {
+        "name": influencer.influencer_name,
+        "description": influencer.influencer_description or "",
+        "age_range": influencer.age_range or "알 수 없음",
+        "gender": influencer.gender or "NON_BINARY",
+        "personality": influencer.influencer_personality or "친근하고 활발한 성격",
+        "mbti": influencer.mbti
+    }
+    
+    try:
+        # 어투 생성 실행
+        result = await qa_service.generate_tone_variations(character_profile)
+        
+        # 응답 반환
+        return ToneGenerationResponse(
+            question=result["question"],
+            responses=result["responses"],
+            generation_time_seconds=result["generation_time_seconds"],
+            method=result["method"]
+        )
+        
+    except Exception as e:
+        logger.error(f"어투 생성 실패: {e}")
+        raise HTTPException(status_code=500, detail=f"어투 생성 중 오류가 발생했습니다: {str(e)}")
+
+
+# QA 생성 관련 엔드포인트
+@router.post("/{influencer_id}/generate-qa", response_model=QAGenerationResponse)
+async def generate_qa_for_influencer(
+    influencer_id: str,
+    request: QAGenerationRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    인플루언서용 대량 QA 생성 (배치 처리용)
+    파인튜닝을 위한 대량의 QA 쌍을 도메인별로 생성
+    """
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID not found")
+    
+    # 인플루언서 존재 확인
+    influencer = await get_influencer_by_id(db, user_id, influencer_id)
+    if not influencer:
+        raise HTTPException(status_code=404, detail="인플루언서를 찾을 수 없습니다")
+    
+    # 작업 ID 생성
+    task_id = str(uuid.uuid4())
+    
+    # QA 생성 서비스
+    qa_service = get_qa_generation_service()
+    
+    # 배치 요청 생성
+    try:
+        result = await qa_service.generate_qa_for_influencer(
+            character_name=influencer.influencer_name,
+            character_description=influencer.influencer_description or "",
+            personality=influencer.influencer_personality or "친근하고 활발한 성격",
+            num_qa_pairs=request.num_qa_pairs,
+            domains=request.domains,
+            system_prompt=request.system_prompt or influencer.system_prompt
+        )
+        
+        # 배치 작업 정보를 DB에 저장
+        batch_key = BatchKey(
+            task_id=task_id,
+            influencer_id=influencer_id,
+            user_id=user_id,
+            qa_count=request.num_qa_pairs,
+            qa_domains=json.dumps(result["domains"]) if result["domains"] else None,
+            status=QAGenerationStatus.PENDING.value,
+            metadata={
+                "type": "qa_generation",
+                "batch_requests_count": result["total_requests"],
+                "qa_per_domain": result["qa_per_domain"]
+            }
+        )
+        db.add(batch_key)
+        db.commit()
+        
+        # 백그라운드에서 배치 파일 생성 및 제출
+        background_tasks.add_task(
+            _submit_qa_batch,
+            task_id,
+            result["batch_requests"],
+            db
+        )
+        
+        return QAGenerationResponse(
+            task_id=task_id,
+            status="accepted",
+            message=f"QA 생성 작업이 시작되었습니다. 총 {request.num_qa_pairs}개의 QA 쌍이 생성될 예정입니다.",
+            total_qa_pairs=request.num_qa_pairs,
+            domains=result["domains"],
+            qa_per_domain=result["qa_per_domain"]
+        )
+        
+    except Exception as e:
+        logger.error(f"QA 생성 중 오류 발생: {e}")
+        raise HTTPException(status_code=500, detail=f"QA 생성 중 오류가 발생했습니다: {str(e)}")
+
+
+async def _submit_qa_batch(task_id: str, batch_requests: List[Dict], db: Session):
+    """배치 요청을 OpenAI에 제출하는 백그라운드 작업"""
+    try:
+        qa_service = get_qa_generation_service()
+        
+        # 배치 파일 생성 및 업로드
+        file_id = await qa_service.create_batch_file(batch_requests)
+        
+        # 배치 작업 제출
+        batch_id = await qa_service.submit_batch(
+            file_id=file_id,
+            metadata={
+                "task_id": task_id,
+                "type": "influencer_qa_generation"
+            }
+        )
+        
+        # DB 업데이트
+        batch_key = db.query(BatchKey).filter(BatchKey.task_id == task_id).first()
+        if batch_key:
+            batch_key.batch_id = batch_id
+            batch_key.status = QAGenerationStatus.BATCH_SUBMITTED.value
+            batch_key.updated_at = datetime.utcnow()
+            db.commit()
+            
+        logger.info(f"✅ QA 배치 제출 완료: task_id={task_id}, batch_id={batch_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ QA 배치 제출 실패: {e}")
+        # DB 업데이트 (실패 상태)
+        batch_key = db.query(BatchKey).filter(BatchKey.task_id == task_id).first()
+        if batch_key:
+            batch_key.status = QAGenerationStatus.FAILED.value
+            batch_key.error_message = str(e)
+            batch_key.updated_at = datetime.utcnow()
+            db.commit()
+
+
+@router.get("/qa-batch/status/{batch_id}", response_model=QABatchStatusResponse)
+async def get_qa_batch_status(
+    batch_id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """QA 배치 작업 상태 조회"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID not found")
+    
+    # 배치 작업 확인
+    batch_key = db.query(BatchKey).filter(
+        BatchKey.batch_id == batch_id,
+        BatchKey.user_id == user_id
+    ).first()
+    
+    if not batch_key:
+        raise HTTPException(status_code=404, detail="배치 작업을 찾을 수 없습니다")
+    
+    # OpenAI 배치 상태 조회
+    qa_service = get_qa_generation_service()
+    
+    try:
+        status = await qa_service.get_batch_status(batch_id)
+        
+        # DB 상태 업데이트
+        if status["status"] == "completed":
+            batch_key.status = QAGenerationStatus.BATCH_COMPLETED.value
+        elif status["status"] == "failed":
+            batch_key.status = QAGenerationStatus.FAILED.value
+        elif status["status"] in ["in_progress", "validating", "finalizing"]:
+            batch_key.status = QAGenerationStatus.BATCH_PROCESSING.value
+        
+        batch_key.updated_at = datetime.utcnow()
+        db.commit()
+        
+        return QABatchStatusResponse(**status)
+        
+    except Exception as e:
+        logger.error(f"배치 상태 조회 실패: {e}")
+        raise HTTPException(status_code=500, detail=f"배치 상태 조회 중 오류가 발생했습니다: {str(e)}")
+
+
+@router.post("/qa-batch/process-results", response_model=QAProcessResultsResponse)
+async def process_qa_batch_results(
+    request: QAProcessResultsRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """QA 배치 결과 처리 및 S3 업로드"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID not found")
+    
+    # 배치 작업 확인
+    batch_key = db.query(BatchKey).filter(
+        BatchKey.batch_id == request.batch_id,
+        BatchKey.user_id == user_id
+    ).first()
+    
+    if not batch_key:
+        raise HTTPException(status_code=404, detail="배치 작업을 찾을 수 없습니다")
+    
+    # QA 서비스와 S3 서비스
+    qa_service = get_qa_generation_service()
+    s3_service = get_s3_service()
+    
+    try:
+        # 배치 결과 처리
+        result = await qa_service.process_batch_results(
+            batch_id=request.batch_id,
+            output_file_id=request.output_file_id
+        )
+        
+        # S3에 업로드
+        if result["qa_pairs"] and s3_service.is_available():
+            # QA 데이터를 JSON으로 변환
+            qa_data = {
+                "influencer_id": request.influencer_id,
+                "batch_id": request.batch_id,
+                "qa_pairs": result["qa_pairs"],
+                "total_count": result["total_count"],
+                "created_at": datetime.utcnow().isoformat()
+            }
+            
+            # S3 키 생성
+            s3_key = f"qa_pairs/processed_qa_{batch_key.task_id}.json"
+            
+            # S3 업로드
+            s3_url = await s3_service.upload_json_data(
+                json_data=qa_data,
+                key=s3_key
+            )
+            
+            # DB 업데이트
+            batch_key.s3_qa_file_url = s3_url
+            batch_key.status = QAGenerationStatus.COMPLETED.value
+            batch_key.qa_count = result["total_count"]
+            batch_key.updated_at = datetime.utcnow()
+            db.commit()
+            
+            # 파인튜닝 자동 시작 (백그라운드)
+            if batch_key.is_finetuning_enabled:
+                background_tasks.add_task(
+                    _start_finetuning_after_qa,
+                    batch_key.influencer_id,
+                    s3_url,
+                    batch_key.task_id,
+                    db
+                )
+            
+            return QAProcessResultsResponse(
+                status="success",
+                qa_pairs=result["qa_pairs"],
+                total_count=result["total_count"],
+                errors=result["errors"],
+                error_count=result["error_count"],
+                s3_url=s3_url
+            )
+        else:
+            # S3 없이 결과만 반환
+            return QAProcessResultsResponse(
+                status="success",
+                qa_pairs=result["qa_pairs"],
+                total_count=result["total_count"],
+                errors=result["errors"],
+                error_count=result["error_count"],
+                s3_url=None
+            )
+            
+    except Exception as e:
+        logger.error(f"배치 결과 처리 실패: {e}")
+        
+        # DB 업데이트 (실패 상태)
+        batch_key.status = QAGenerationStatus.FAILED.value
+        batch_key.error_message = str(e)
+        batch_key.updated_at = datetime.utcnow()
+        db.commit()
+        
+        raise HTTPException(status_code=500, detail=f"배치 결과 처리 중 오류가 발생했습니다: {str(e)}")
+
+
+async def _start_finetuning_after_qa(
+    influencer_id: str,
+    s3_qa_file_url: str,
+    task_id: str,
+    db: Session
+):
+    """QA 생성 완료 후 파인튜닝 자동 시작"""
+    try:
+        finetuning_service = get_finetuning_service()
+        
+        success = await finetuning_service.start_finetuning_for_influencer(
+            influencer_id=influencer_id,
+            s3_qa_file_url=s3_qa_file_url,
+            db=db,
+            task_id=task_id
+        )
+        
+        if success:
+            logger.info(f"✅ 파인튜닝 자동 시작 성공: {influencer_id}")
+        else:
+            logger.error(f"❌ 파인튜닝 자동 시작 실패: {influencer_id}")
+            
+    except Exception as e:
+        logger.error(f"❌ 파인튜닝 자동 시작 중 오류: {e}")
 
 
 @router.post("/{influencer_id}/system-prompt")
@@ -1612,16 +1873,14 @@ async def chat_with_influencer(
         # API 사용량 추적
         await track_api_usage(db, str(api_key.influencer_id))
 
-        # VLLM 서비스 호출
+        # RunPod 서비스 호출
         try:
-            from app.services.vllm_client import (
-                vllm_generate_response,
-                vllm_health_check,
-            )
+            from app.services.runpod_manager import get_vllm_manager
 
-            # VLLM 서버 상태 확인
-            if not await vllm_health_check():
-                logger.warning("VLLM 서버에 연결할 수 없어 기본 응답을 사용합니다.")
+            # vLLM 매니저 가져오기 및 서버 상태 확인
+            vllm_manager = get_vllm_manager()
+            if not await vllm_manager.health_check():
+                logger.warning("vLLM 서버에 연결할 수 없어 기본 응답을 사용합니다.")
                 response_text = f"안녕하세요! 저는 {api_key.influencer_name}입니다. '{request.message}'에 대한 답변을 드리겠습니다."
             else:
                 # 시스템 프롬프트 구성
@@ -1631,7 +1890,7 @@ async def chat_with_influencer(
                     else f"당신은 {api_key.influencer_name}입니다. 친근하고 도움이 되는 답변을 해주세요."
                 )
 
-                # VLLM 서버에서 응답 생성
+                # RunPod 서버에서 응답 생성
                 if api_key.influencer_model_repo:
                     model_id = str(api_key.influencer_model_repo)
 
@@ -1653,35 +1912,35 @@ async def chat_with_influencer(
                                 str(hf_token_manage.hf_token_value)
                             )
 
-                    # VLLM 클라이언트 가져오기
-                    from app.services.vllm_client import get_vllm_client
+                    # vLLM 매니저로 응답 생성
+                    result = await vllm_manager.generate_text(
+                        prompt=request.message,
+                        lora_adapter=str(api_key.influencer_id),
+                        hf_repo=model_id,  # HuggingFace repository 경로
+                        hf_token=hf_token,  # HF 토큰
+                        system_message=system_message,
+                        max_tokens=512,
+                        stream=False
+                    )
 
-                    vllm_client = await get_vllm_client()
+                    # 응답 텍스트 추출 (간소화된 형식)
+                    if result.get("status") == "completed":
+                        # 새로운 형식: generated_text가 직접 반환됨
+                        response_text = result.get("generated_text", "")
+                        if not response_text:
+                            # 이전 형식 호환성을 위한 처리
+                            output = result.get("output", {})
+                            if isinstance(output, dict) and output.get("generated_text"):
+                                response_text = output.get("generated_text", "")
+                            else:
+                                response_text = f"안녕하세요! 저는 {api_key.influencer_name}입니다. '{request.message}'에 대한 답변을 드리겠습니다."
+                    else:
+                        response_text = f"안녕하세요! 저는 {api_key.influencer_name}입니다. '{request.message}'에 대한 답변을 드리겠습니다."
 
-                    # 어댑터 로드
-                    try:
-                        # model_id는 인플루언서 ID로, hf_repo_name은 실제 레포지토리 경로로 사용
-                        await vllm_client.load_adapter(
-                            model_id=str(api_key.influencer_id),
-                            hf_repo_name=model_id,
-                            hf_token=hf_token,
-                        )
-                        logger.info(f"✅ VLLM 어댑터 로드 완료: {model_id}")
-                    except Exception as e:
-                        logger.warning(f"⚠️ 어댑터 로드 실패, 기본 모델 사용: {e}")
-                        # 어댑터 로드 실패 시 기본 모델 사용
-                        model_id = str(api_key.influencer_id)
+                    logger.info(f"✅ vLLM 매니저에서 모델 사용 준비: {model_id}")
                 else:
-                    model_id = str(api_key.influencer_id)
-
-                response_text = await vllm_generate_response(
-                    user_message=request.message,
-                    system_message=system_message,
-                    influencer_name=str(api_key.influencer_name),
-                    model_id=model_id,
-                    max_new_tokens=200,
-                    temperature=0.7,
-                )
+                    # 기본 응답
+                    response_text = f"안녕하세요! 저는 {api_key.influencer_name}입니다. '{request.message}'에 대한 답변을 드리겠습니다."
 
                 logger.info(f"✅ VLLM 응답 생성 성공: {api_key.influencer_name}")
 
@@ -2106,3 +2365,295 @@ async def get_voice_download_url(
             )
     else:
         raise HTTPException(status_code=404, detail="음성 파일을 찾을 수 없습니다")
+
+
+@router.get("/{influencer_id}/voices/status-stream")
+async def get_voice_status_stream(
+    influencer_id: str,
+    token: str = Query(...),  # URL 파라미터로 토큰 받기
+    db: Session = Depends(get_db),
+    s3_service: S3Service = Depends(get_s3_service),
+):
+    """음성 상태 변경을 실시간으로 스트리밍하는 SSE 엔드포인트"""
+    # JWT 토큰 검증
+    from app.core.security import verify_token
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID not found")
+
+    # 인플루언서 소유권 확인
+    influencer = (
+        db.query(AIInfluencer)
+        .filter(
+            AIInfluencer.influencer_id == influencer_id,
+            AIInfluencer.user_id == user_id,
+        )
+        .first()
+    )
+    
+    if not influencer:
+        raise HTTPException(status_code=404, detail="인플루언서를 찾을 수 없습니다")
+
+    async def event_stream():
+        """SSE 이벤트 스트림 생성기"""
+        last_check = {}  # 마지막 확인된 상태 저장
+        
+        try:
+            while True:
+                # 현재 pending 상태인 음성들 조회
+                pending_voices = (
+                    db.query(GeneratedVoice)
+                    .filter(
+                        GeneratedVoice.influencer_id == influencer.influencer_id,
+                        GeneratedVoice.status == "pending"
+                    )
+                    .all()
+                )
+                
+                # 상태가 변경된 음성들 확인
+                updated_voices = []
+                for voice in pending_voices:
+                    voice_id = str(voice.id)
+                    current_status = voice.status
+                    
+                    # 상태가 변경되었거나 처음 체크하는 경우
+                    if voice_id not in last_check or last_check[voice_id] != current_status:
+                        # S3에서 presigned URL 생성
+                        presigned_url = None
+                        if voice.s3_key and s3_service.is_available():
+                            try:
+                                presigned_url = s3_service.generate_presigned_url(
+                                    voice.s3_key, expiration=3600
+                                )
+                            except Exception as e:
+                                logger.error(f"S3 URL 생성 실패: {e}")
+                        
+                        voice_data = {
+                            "id": voice.id,
+                            "text": voice.text,
+                            "status": voice.status,
+                            "url": presigned_url,
+                            "s3_url": presigned_url,
+                            "duration": voice.duration,
+                            "created_at": voice.created_at.isoformat() if voice.created_at else None,
+                            "task_id": voice.task_id
+                        }
+                        
+                        updated_voices.append(voice_data)
+                        last_check[voice_id] = current_status
+                
+                # 변경된 음성이 있으면 클라이언트에 전송
+                if updated_voices:
+                    event_data = {
+                        "event": "voice_status_update",
+                        "data": updated_voices,
+                        "timestamp": time.time()
+                    }
+                    yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                
+                # pending 상태인 음성이 없으면 연결 종료
+                if not pending_voices:
+                    event_data = {
+                        "event": "all_completed",
+                        "data": {"message": "모든 음성 생성이 완료되었습니다"},
+                        "timestamp": time.time()
+                    }
+                    yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                    break
+                
+                # 3초 대기
+                await asyncio.sleep(3)
+                
+        except Exception as e:
+            logger.error(f"음성 상태 스트림 중 오류: {e}")
+            error_data = {
+                "event": "error",
+                "data": {"message": str(e)},
+                "timestamp": time.time()
+            }
+            yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Cache-Control"
+        }
+    )
+
+
+@router.post("/fix-model-repos")
+async def fix_model_repos(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """잘못된 model_repo 경로를 수정하는 임시 엔드포인트"""
+    try:
+        from app.services.hf_token_resolver import get_token_for_influencer
+        
+        # user/로 시작하는 모든 인플루언서 찾기
+        influencers = db.query(AIInfluencer).filter(
+            AIInfluencer.influencer_model_repo.like("user/%")
+        ).all()
+        
+        fixed_count = 0
+        for influencer in influencers:
+            try:
+                # HF 토큰의 사용자명 가져오기
+                hf_token, hf_username = await get_token_for_influencer(influencer, db)
+                
+                if hf_username and influencer.influencer_model_repo:
+                    old_repo = influencer.influencer_model_repo
+                    # user/uuid -> actual-username/uuid
+                    if old_repo.startswith("user/"):
+                        uuid_part = old_repo.split("/")[1]
+                        new_repo = f"{hf_username}/{uuid_part}"
+                        influencer.influencer_model_repo = new_repo
+                        fixed_count += 1
+                        logger.info(f"✅ 수정됨: {old_repo} -> {new_repo}")
+            except Exception as e:
+                logger.error(f"❌ {influencer.influencer_id} 수정 실패: {e}")
+                continue
+        
+        db.commit()
+        
+        return {
+            "message": f"{fixed_count}개의 model_repo 경로가 수정되었습니다",
+            "fixed_count": fixed_count
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ model_repo 수정 실패: {e}")
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@router.post("/finetuning/result", response_model=FineTuningResultResponse)
+async def receive_finetuning_result(
+    request: FineTuningResultRequest,
+    db: Session = Depends(get_db),
+):
+    """vLLM Worker로부터 파인튜닝 결과 수신"""
+    logger.info(
+        f"🎯 파인튜닝 결과 수신: task_id={request.task_id}, status={request.status}"
+    )
+    
+    try:
+        # VLLM task_id로 먼저 찾고, 없으면 일반 task_id로 찾기
+        batch_key_entry = (
+            db.query(BatchKey)
+            .filter(BatchKey.vllm_task_id == request.task_id)
+            .first()
+        )
+
+        if not batch_key_entry:
+            # 하위 호환성을 위해 task_id로도 검색
+            batch_key_entry = (
+                db.query(BatchKey)
+                .filter(BatchKey.task_id == request.task_id)
+                .first()
+            )
+
+        if not batch_key_entry:
+            logger.warning(
+                f"⚠️ 해당 task_id를 가진 BatchKey를 찾을 수 없음: {request.task_id}"
+            )
+            return FineTuningResultResponse(
+                success=False,
+                message="작업을 찾을 수 없습니다",
+                task_id=request.task_id,
+                error="Task not found"
+            )
+
+        if request.status == "completed":
+            # 허깅페이스 URL에서 레포 경로만 추출
+            from app.utils.hf_utils import extract_hf_repo_path
+
+            hf_repo_path = extract_hf_repo_path(request.hf_model_url)
+
+            batch_key_entry.status = QAGenerationStatus.FINALIZED.value
+            batch_key_entry.hf_model_url = hf_repo_path  # 레포 경로만 저장
+            batch_key_entry.completed_at = datetime.now()
+            
+            # 메타데이터 저장
+            if request.metadata:
+                batch_key_entry.metadata = json.dumps(request.metadata)
+            
+            logger.info(
+                f"✅ 파인튜닝 완료: task_id={request.task_id}, 모델 레포={hf_repo_path}"
+            )
+
+            # AIInfluencer 모델 상태를 사용 가능으로 업데이트
+            influencer = (
+                db.query(AIInfluencer)
+                .filter(AIInfluencer.influencer_id == batch_key_entry.influencer_id)
+                .first()
+            )
+
+            if influencer:
+                influencer.learning_status = 1  # 1: 사용가능
+                
+                # HF 레포 경로 처리
+                if hf_repo_path:
+                    # HF 토큰의 사용자명 가져오기
+                    try:
+                        from app.services.hf_token_resolver import get_token_for_influencer
+                        hf_token, hf_username = await get_token_for_influencer(influencer, db)
+                        
+                        # user/uuid 형태인 경우 실제 사용자명으로 교체
+                        if hf_repo_path.startswith("user/") and hf_username:
+                            # user/uuid -> actual-username/uuid
+                            uuid_part = hf_repo_path.split("/")[1]
+                            hf_repo_path = f"{hf_username}/{uuid_part}"
+                            logger.info(f"🔧 HF 레포 경로 수정: {hf_repo_path}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ HF 사용자명 가져오기 실패: {e}")
+                    
+                    influencer.influencer_model_repo = hf_repo_path  # 레포 경로만 저장
+                logger.info(
+                    f"✅ 인플루언서 모델 상태 업데이트 완료: influencer_id={batch_key_entry.influencer_id}, status=사용 가능"
+                )
+                
+        elif request.status == "FAILED":
+            batch_key_entry.status = QAGenerationStatus.FAILED.value
+            batch_key_entry.error_message = request.error_message
+            batch_key_entry.completed_at = datetime.now()
+            logger.error(
+                f"❌ 파인튜닝 실패: task_id={request.task_id}, 오류={request.error_message}"
+            )
+        else:
+            # 기타 상태 업데이트 (예: processing, validating 등)
+            batch_key_entry.status = request.status
+            logger.info(
+                f"🔄 파인튜닝 상태 업데이트: task_id={request.task_id}, 상태={request.status}"
+            )
+
+        db.commit()
+        
+        return FineTuningResultResponse(
+            success=True,
+            message=f"파인튜닝 결과 처리 완료: {request.status}",
+            task_id=request.task_id
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ 파인튜닝 결과 처리 중 오류: {e}")
+        db.rollback()
+        
+        return FineTuningResultResponse(
+            success=False,
+            message="파인튜닝 결과 처리 실패",
+            task_id=request.task_id,
+            error=str(e)
+        )

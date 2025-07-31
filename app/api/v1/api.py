@@ -14,7 +14,7 @@ from app.api.v1.endpoints import (
     model_test,
     hf_tokens,
     admin,
-    chatbot,  # 챗봇 활성화
+    chatbot,  # WebSocket 기반 - RunPod Serverless와 함께 사용
     rag,  # 통합 RAG API
     comfyui,
     tts,
@@ -56,7 +56,7 @@ api_router.include_router(boards.router, prefix="/boards", tags=["Boards"])
 # 채팅 API
 api_router.include_router(chat.router, prefix="/chat", tags=["Chat"])
 
-# 챗봇 WebSocket API
+# 챗봇 WebSocket API - RunPod Serverless와 함께 사용
 api_router.include_router(chatbot.router, prefix="/chatbot", tags=["Chatbot"])
 
 # 통합 RAG API (VLLM + OpenAI)

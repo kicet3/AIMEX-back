@@ -251,7 +251,7 @@ class BatchKey(Base):
     input_file_id = Column(String(255), nullable=True, comment="입력 파일 ID")
     output_file_id = Column(String(255), nullable=True, comment="출력 파일 ID")
     error_message = Column(Text, nullable=True, comment="오류 메시지")
-    vllm_task_id = Column(String(255), nullable=True, comment="VLLM 파인튜닝 작업 ID")
+    vllm_task_id = Column(String(255), nullable=True, comment="VLLM/RunPod 파인튜닝 작업 ID")
 
     # S3 업로드 정보
     s3_qa_file_url = Column(String(500), nullable=True, comment="S3 QA 파일 URL")

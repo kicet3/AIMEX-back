@@ -10,7 +10,7 @@ from app.core.encryption import decrypt_sensitive_data
 from app.core.security import get_current_user
 import re
 from fastapi import HTTPException
-from app.services.vllm_client import get_vllm_client, vllm_load_adapter_if_needed
+from app.services.runpod_manager import get_vllm_manager
 import asyncio
 import logging
 
@@ -48,7 +48,7 @@ async def process_single_influencer(
     message: str,
     ai_influencer: AIInfluencer,
     hf_token: str,
-    vllm_client
+    vllm_manager
 ) -> InfluencerResponse:
     """단일 인플루언서에 대한 응답 생성"""
     try:
@@ -71,19 +71,8 @@ async def process_single_influencer(
         # 모델 ID 생성 (어댑터 이름)
         model_id = influencer_info.influencer_id
         
-        # 어댑터 로드 (필요시)
-        logger.info(f"Loading adapter if needed: {model_id} from {adapter_repo}")
-        loaded = await vllm_load_adapter_if_needed(
-            model_id=model_id,
-            hf_repo_name=adapter_repo,
-            hf_token=hf_token
-        )
-        
-        if not loaded:
-            return InfluencerResponse(
-                influencer_id=influencer_info.influencer_id,
-                response="어댑터를 로드할 수 없습니다."
-            )
+        # RunPod는 동적으로 어댑터를 로드하므로 미리 로드할 필요 없음
+        logger.info(f"RunPod will dynamically load adapter: {model_id} from {adapter_repo}")
         
         # 시스템 프롬프트 생성
         if ai_influencer.system_prompt:
@@ -101,19 +90,28 @@ async def process_single_influencer(
             system_prompt += "한국어로만 대답해.\n"
             logger.info(f"⚠️ 저장된 시스템 프롬프트가 없어 기본 프롬프트 사용: {ai_influencer.influencer_name}")
         
-        # VLLM 서버로 응답 생성 요청
-        logger.info(f"Generating response for {influencer_info.influencer_id} using VLLM")
-        result = await vllm_client.generate_response(
-            user_message=message,
+        # vLLM 매니저로 응답 생성 요청
+        logger.info(f"Generating response for {influencer_info.influencer_id} using vLLM Manager")
+        result = await vllm_manager.generate_text(
+            prompt=message,
+            lora_adapter=str(influencer_info.influencer_id),
+            hf_repo=adapter_repo,
+            hf_token=hf_token,
             system_message=system_prompt,
-            influencer_name=ai_influencer.influencer_name,
-            model_id=model_id,
-            max_new_tokens=150,
-            temperature=0.7
+            max_tokens=150,
+            temperature=0.7,
+            stream=False
         )
         
         # 응답 추출
-        response_text = result.get("response", "응답을 생성할 수 없습니다.")
+        if result.get("status") == "completed" and result.get("output"):
+            output = result["output"]
+            if output.get("status") == "success":
+                response_text = output.get("generated_text", "")
+            else:
+                response_text = "응답을 생성할 수 없습니다."
+        else:
+            response_text = result.get("generated_text", "응답을 생성할 수 없습니다.")
         logger.info(f"✅ Generated response for {influencer_info.influencer_id}")
         
         return InfluencerResponse(
@@ -146,8 +144,8 @@ async def multi_chat(request: MultiChatRequest, db: Session = Depends(get_db), c
     user_group_ids = [team.group_id for team in user.teams]
     logger.info(f"User belongs to groups: {user_group_ids}")
     
-    # VLLM 클라이언트 가져오기
-    vllm_client = await get_vllm_client()
+    # vLLM 매니저 가져오기
+    vllm_manager = get_vllm_manager()
     
     # 병렬 처리를 위한 태스크 리스트
     tasks = []
@@ -228,7 +226,7 @@ async def multi_chat(request: MultiChatRequest, db: Session = Depends(get_db), c
                 message=request.message,
                 ai_influencer=ai_influencer,
                 hf_token=decrypted_token,
-                vllm_client=vllm_client
+                vllm_manager=vllm_manager
             )
         )
         tasks.append(task)

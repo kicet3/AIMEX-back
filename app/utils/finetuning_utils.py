@@ -42,35 +42,42 @@ async def create_system_message(influencer_name: str, personality: str, style_in
         logger.error(f"❌ vLLM 서버 연결 실패: {e}")
         raise Exception(f"vLLM 서버를 사용할 수 없습니다: {e}")
 
-async def convert_qa_data_for_finetuning(qa_data: List[Dict], influencer_name: str, 
-                                     personality: str, style_info: str = "") -> List[Dict]:
-    """vLLM 서버에 QA 데이터 변환 요청"""
+def convert_qa_data_for_finetuning(qa_data: List[Dict], influencer_name: str, 
+                                   personality: str, style_info: str = "") -> List[Dict]:
+    """QA 데이터를 파인튜닝용 형식으로 변환 (RunPod 워커가 원하는 형식)"""
     try:
-        async with aiohttp.ClientSession() as session:
-            payload = {
-                "qa_data": qa_data,
-                "influencer_name": influencer_name,
-                "personality": personality,
-                "style_info": style_info
+        logger.info(f"🔄 QA 데이터 변환 시작: {len(qa_data)}개")
+        
+        # RunPod 워커는 원본 QA 형식을 그대로 원함
+        # 시스템 메시지는 별도로 전달되므로 여기서는 QA만 정리
+        validated_qa_data = []
+        
+        for qa in qa_data:
+            if not isinstance(qa, dict):
+                logger.warning(f"잘못된 QA 형식 (dict가 아님): {type(qa)}")
+                continue
+                
+            question = qa.get("question", qa.get("q", ""))
+            answer = qa.get("answer", qa.get("a", ""))
+            
+            if not question or not answer:
+                logger.warning(f"빈 질문 또는 답변 건너뛰기: Q={question}, A={answer}")
+                continue
+            
+            # RunPod 워커가 원하는 형식
+            validated_qa = {
+                "question": question,
+                "answer": answer
             }
             
-            async with session.post(
-                f"{VLLM_SERVER_URL}/api/v1/convert-qa-data",
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=60)
-            ) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    logger.info(f"✅ vLLM 서버에서 QA 데이터 변환 성공: {len(result.get('finetuning_data', []))}개")
-                    return result.get("finetuning_data", [])
-                else:
-                    error_msg = f"vLLM 서버 QA 데이터 변환 실패: {response.status}"
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
-                    
+            validated_qa_data.append(validated_qa)
+        
+        logger.info(f"✅ QA 데이터 변환 완료: {len(validated_qa_data)}개")
+        return validated_qa_data
+        
     except Exception as e:
-        logger.error(f"❌ vLLM 서버 연결 실패: {e}")
-        raise Exception(f"vLLM 서버를 사용할 수 없습니다: {e}")
+        logger.error(f"❌ QA 데이터 변환 실패: {e}")
+        raise Exception(f"QA 데이터 변환 실패: {e}")
 
 
 async def validate_qa_data(qa_data: List[Dict]) -> bool:

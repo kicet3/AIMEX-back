@@ -288,6 +288,53 @@ class S3Service:
             logger.error(f"S3 이미지 다운로드 중 예외 발생: {e}")
             return None
     
+    async def upload_file_from_bytes(self, file_bytes: bytes, key: str, content_type: str = None) -> Dict[str, Any]:
+        """
+        바이트 데이터를 S3에 업로드
+        
+        Args:
+            file_bytes: 업로드할 바이트 데이터
+            key: S3에서 사용할 키 (경로)
+            content_type: 파일의 Content-Type
+            
+        Returns:
+            업로드 성공 시 결과 딕셔너리, 실패 시 예외 발생
+        """
+        if not self.is_available():
+            raise Exception("S3 서비스를 사용할 수 없습니다")
+            
+        try:
+            # Content-Type 기본값 설정
+            if not content_type:
+                content_type = 'application/octet-stream'
+            
+            # 바이트 데이터 업로드
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=key,
+                Body=file_bytes,
+                ContentType=content_type
+            )
+            
+            # S3 URL 생성
+            s3_url = f"https://{self.bucket_name}.s3.{self.aws_region}.amazonaws.com/{key}"
+            
+            logger.info(f"바이트 데이터 업로드 성공: {key} -> {s3_url}")
+            
+            return {
+                "url": s3_url,
+                "key": key,
+                "size": len(file_bytes),
+                "content_type": content_type
+            }
+            
+        except NoCredentialsError:
+            logger.error("AWS 자격증명을 찾을 수 없습니다")
+            raise Exception("AWS 자격증명을 찾을 수 없습니다")
+        except ClientError as e:
+            logger.error(f"S3 업로드 실패: {e}")
+            raise Exception(f"S3 업로드 실패: {e}")
+    
     async def list_objects(self, prefix: str, max_keys: int = 1000) -> List[Dict[str, Any]]:
         """
         S3에서 객체 목록 조회

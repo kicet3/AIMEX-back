@@ -18,7 +18,7 @@ from app.models.user import HFTokenManage
 from app.core.encryption import decrypt_sensitive_data
 from app.core.config import settings
 from app.services.embedding_client import VLLMEmbeddingClient, generate_embeddings
-from app.services.vllm_client import vllm_health_check, get_vllm_client
+from app.services.runpod_manager import get_vllm_manager
 
 logger = logging.getLogger(__name__)
 
@@ -318,9 +318,10 @@ class RAGChatGenerator:
     ) -> str:
         """컨텍스트 기반 응답 생성"""
         try:
-            # VLLM 서버 상태 확인
-            if not await vllm_health_check():
-                logger.warning("⚠️ VLLM 서버 연결 불안정, 기본 응답 사용")
+            # vLLM 서버 상태 확인
+            vllm_manager = get_vllm_manager()
+            if not await vllm_manager.health_check():
+                logger.warning("⚠️ vLLM 서버 연결 불안정, 기본 응답 사용")
                 return f"죄송합니다. 현재 서버 상태가 불안정합니다. 질문: {query}"
 
             # 시스템 메시지 구성

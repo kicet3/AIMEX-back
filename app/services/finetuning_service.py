@@ -8,13 +8,14 @@ import json
 import logging
 import tempfile
 import shutil
+import time
 from typing import Optional, Dict, List
 from datetime import datetime
 from dataclasses import dataclass
 from enum import Enum
 
 from app.services.s3_service import get_s3_service
-from app.services.vllm_client import get_vllm_client, vllm_health_check
+from app.services.runpod_finetuning_client import RunPodFineTuningClient
 from app.core.encryption import decrypt_sensitive_data
 from app.services.hf_token_resolver import get_token_for_influencer
 from app.core.config import settings
@@ -30,32 +31,14 @@ from app.utils.timezone_utils import get_current_kst
 logger = logging.getLogger(__name__)
 
 
-# vLLM 서버의 FineTuningStatus import
-try:
-    import sys
-    import os
-
-    # vLLM 경로 추가
-    vllm_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "..", "vllm"
-    )
-    sys.path.insert(0, vllm_path)
-
-    from app.models import FineTuningStatus
-
-    logger.info("✅ vLLM FineTuningStatus import 성공")
-
-except ImportError as e:
-    logger.warning(f"⚠️ vLLM FineTuningStatus import 실패, 로컬 버전 사용: {e}")
-
-    # 폴백: 로컬 버전
-    class FineTuningStatus(Enum):
-        PENDING = "pending"
-        PREPARING_DATA = "preparing_data"
-        TRAINING = "training"
-        UPLOADING = "uploading"
-        COMPLETED = "completed"
-        FAILED = "failed"
+# FineTuningStatus Enum 정의
+class FineTuningStatus(Enum):
+    PENDING = "pending"
+    PREPARING_DATA = "preparing_data"
+    TRAINING = "training"
+    UPLOADING = "uploading"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 @dataclass
@@ -86,6 +69,7 @@ class InfluencerFineTuningService:
     def __init__(self):
         """파인튜닝 서비스 초기화"""
         self.s3_service = get_s3_service()
+        self.runpod_client = RunPodFineTuningClient()
         self.tasks: Dict[str, FineTuningTask] = {}
 
         # 기본 모델 설정
@@ -449,8 +433,8 @@ class InfluencerFineTuningService:
                     influencer_name, personality, style_info
                 )
 
-            # QA 데이터 변환 (vLLM 서버 사용)
-            finetuning_data = await convert_qa_data_for_finetuning(
+            # QA 데이터 변환 (백엔드에서 직접 처리)
+            finetuning_data = convert_qa_data_for_finetuning(
                 qa_data, influencer_name, personality, style_info
             )
 
@@ -469,10 +453,11 @@ class InfluencerFineTuningService:
         hf_token: str,
         epochs: int = 5,
         task_id: Optional[str] = None,
-        system_prompt: str = ""
+        system_prompt: str = "",
+        influencer_id: str = ""
     ) -> Optional[str]:
         """
-        파인튜닝 실행 (VLLM 서버에 작업 제출 후 즉시 반환)
+        파인튜닝 실행 (RunPod Serverless에 작업 제출)
         Args:
             qa_data: 훈련 데이터 (QA 쌍 리스트)
             system_message: 시스템 메시지
@@ -480,106 +465,59 @@ class InfluencerFineTuningService:
             hf_token: 허깅페이스 토큰
             epochs: 훈련 에포크 수
             task_id: QA 생성 작업 ID (선택적)
+            system_prompt: 시스템 프롬프트
+            influencer_id: 인플루언서 ID
         Returns:
-            task_id (성공 시), None (실패 시)
+            RunPod job_id (성공 시), None (실패 시)
         """
         try:
             logger.info(f"파인튜닝 시작: {hf_repo_id}")
 
-            # VLLM 서버 상태 확인
-            logger.info(f"🔍 VLLM 서버 상태 확인 중... (URL: {settings.VLLM_BASE_URL})")
-            health_status = await vllm_health_check()
-            if not health_status:
-                logger.error(f"❌ VLLM 서버가 비활성화되었거나 연결할 수 없습니다. URL: {settings.VLLM_BASE_URL}")
-                logger.error(f"   - VLLM_ENABLED: {settings.VLLM_ENABLED}")
-                logger.error(f"   - VLLM_HOST: {getattr(settings, 'VLLM_HOST', 'N/A')}")
-                logger.error(f"   - VLLM_PORT: {getattr(settings, 'VLLM_PORT', 'N/A')}")
-                return None
-            else:
-                logger.info("✅ VLLM 서버 연결 성공")
+            # RunPod 엔드포인트 확인
+            endpoint_id = await self.runpod_client.find_or_create_endpoint()
+            logger.info(f"🔍 RunPod 엔드포인트 확인: {endpoint_id}")
 
-            try:
-                logger.info(f"🚀 VLLM 서버에서 파인튜닝 실행: {hf_repo_id}")
+            # RunPod Serverless로 파인튜닝 요청
+            logger.info(f"🚀 RunPod Serverless로 파인튜닝 요청: {hf_repo_id}")
+            
+            logger.info(f"📋 RunPod 파인튜닝 요청 파라미터:")
+            logger.info(f"  - task_id: {task_id or f'ft_{influencer_id}_{int(time.time())}'}")
+            logger.info(f"  - qa_data 개수: {len(qa_data)}")
+            logger.info(f"  - system_message 길이: {len(system_message or system_prompt or '')}")
+            logger.info(f"  - hf_repo_id: {hf_repo_id}")
+            logger.info(f"  - training_epochs: {epochs}")
+            logger.info(f"  - influencer_id: {influencer_id}")
+            
+            result = await self.runpod_client.start_finetuning(
+                task_id=task_id or f"ft_{influencer_id}_{int(time.time())}",
+                qa_data=qa_data,
+                system_message=system_message or system_prompt,
+                hf_token=hf_token,
+                hf_repo_id=hf_repo_id,
+                training_epochs=epochs,
+                influencer_id=influencer_id
+            )
 
-                # 인플루언서 정보 추출 (QA 데이터에서)
-                influencer_name = hf_repo_id.split("/")[-1].replace("-finetuned", "")
-                personality = "친근하고 활발한 성격"  # 기본값
-
-                # 이미 변환된 데이터인지 확인
-                is_already_converted = (
-                    qa_data
-                    and isinstance(qa_data[0], dict)
-                    and "messages" in qa_data[0]
-                )
-
-                vllm_client = await get_vllm_client()
-                result = await vllm_client.start_finetuning(
-                    influencer_id=influencer_name,
-                    influencer_name=influencer_name,
-                    personality=personality,
-                    qa_data=qa_data,
-                    hf_repo_id=hf_repo_id,
-                    hf_token=hf_token,
-                    training_epochs=epochs,
-                    system_prompt=system_prompt,
-                    style_info="",
-                    is_converted=is_already_converted,
-                    task_id=task_id,
-                )
-
-                task_id = result.get("task_id")
-                if task_id:
-                    # 파인튜닝 작업이 시작되면 task_id만 반환 (폴링하지 않음)
-                    # VLLM 서버가 완료 시 웹훅을 통해 알려줌
-                    logger.info(f"✅ 파인튜닝 작업 제출 완료: task_id={task_id}")
-                    return task_id
+            logger.info(f"📊 RunPod 응답: {result}")
+            
+            if result.get("success"):
+                runpod_job_id = result.get("job_id")
+                if runpod_job_id:
+                    logger.info(f"✅ RunPod 파인튜닝 작업 제출 완료: job_id={runpod_job_id}")
+                    return runpod_job_id
                 else:
-                    raise Exception("VLLM 파인튜닝 작업 시작 실패")
-
-            except Exception as e:
-                logger.error(f"VLLM 파인튜닝 실행 중 오류: {e}")
-                return None
+                    error_msg = f"RunPod 응답에 job_id가 없음: {result}"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+            else:
+                error_msg = f"RunPod 파인튜닝 작업 시작 실패: {result.get('error', 'Unknown error')}"
+                logger.error(error_msg)
+                raise Exception(error_msg)
 
         except Exception as e:
-            logger.error(f"파인튜닝 실행 실패: {e}")
+            logger.error(f"RunPod 파인튜닝 실행 중 오류: {e}")
             return None
 
-    # 폴링 방식은 더 이상 사용하지 않음 (웹훅 기반으로 전환)
-    # async def _wait_for_vllm_finetuning(self, task_id: str, vllm_client, timeout: int = 3600) -> Optional[str]:
-    #     """VLLM 파인튜닝 완료 대기"""
-    #     import asyncio
-    #
-    #     start_time = datetime.now()
-    #
-    #     while True:
-    #         try:
-    #             status = await vllm_client.get_finetuning_status(task_id)
-    #             current_status = status.get("status")
-    #
-    #             logger.info(f"VLLM 파인튜닝 상태: {current_status}")
-    #
-    #             if current_status == "completed":
-    #                 hf_model_url = status.get("hf_model_url")
-    #                 logger.info(f"✅ VLLM 파인튜닝 완료: {hf_model_url}")
-    #                 return hf_model_url
-    #
-    #             elif current_status == "failed":
-    #                 error_msg = status.get("error_message", "알 수 없는 오류")
-    #                 logger.error(f"❌ VLLM 파인튜닝 실패: {error_msg}")
-    #                 return None
-    #
-    #             # 타임아웃 확인
-    #             elapsed = (datetime.now() - start_time).total_seconds()
-    #             if elapsed > timeout:
-    #                 logger.error(f"⏰ VLLM 파인튜닝 타임아웃: {timeout}초")
-    #                 return None
-    #
-    #             # 10초 대기
-    #             await asyncio.sleep(10)
-    #
-    #         except Exception as e:
-    #             logger.error(f"VLLM 파인튜닝 상태 확인 실패: {e}")
-    #             return None
 
     async def start_finetuning_task(
         self,
@@ -632,7 +570,7 @@ class InfluencerFineTuningService:
             safe_name = model_repo.split("/")[-1] if "/" in model_repo else model_repo
         else:
             # 새로운 repo 경로 생성
-            safe_name = f"{english_name}-finetuned"
+            safe_name = f"EXAONE-{english_name}-finetuned"
             hf_repo_id = f"{hf_username}/{safe_name}"
 
         logger.info(
@@ -699,24 +637,24 @@ class InfluencerFineTuningService:
             task.status = FineTuningStatus.TRAINING
             task.updated_at = get_current_kst()
 
-            vllm_task_id = await self.run_finetuning(
+            runpod_job_id = await self.run_finetuning(
                 qa_data=finetuning_qa_data,
                 system_message=system_message,
                 hf_repo_id=task.hf_repo_id,
                 hf_token=hf_token,
                 epochs=task.training_epochs,
                 task_id=task.qa_batch_task_id,
-                system_prompt=task.system_prompt or system_message
+                system_prompt=task.system_prompt or system_message,
+                influencer_id=task.influencer_id
             )
 
-            if vllm_task_id:
-                # VLLM 서버에 작업이 제출됨
-                # 웹훅을 통해 완료 통지를 받을 예정
+            if runpod_job_id:
+                # RunPod Serverless에 작업이 제출됨
                 logger.info(
-                    f"파인튜닝 작업 제출됨: {task_id} → VLLM task_id: {vllm_task_id}"
+                    f"파인튜닝 작업 제출됨: {task_id} → RunPod job_id: {runpod_job_id}"
                 )
 
-                # BatchKey 테이블에 VLLM task_id 업데이트 (웹훅 처리를 위해)
+                # BatchKey 테이블에 RunPod job_id 업데이트
                 if task.qa_batch_task_id:
                     from app.database import get_db
                     from app.models.influencer import BatchKey
@@ -730,9 +668,9 @@ class InfluencerFineTuningService:
                             .first()
                         )
                         if batch_key:
-                            batch_key.vllm_task_id = vllm_task_id
+                            batch_key.vllm_task_id = runpod_job_id  # RunPod job_id를 저장
                             db.commit()
-                            logger.info(f"BatchKey에 VLLM task_id 저장: {vllm_task_id}")
+                            logger.info(f"BatchKey에 RunPod job_id 저장: {runpod_job_id}")
                     except Exception as e:
                         logger.error(f"BatchKey 업데이트 실패: {e}")
                     finally:
@@ -740,7 +678,7 @@ class InfluencerFineTuningService:
 
                 return True
             else:
-                raise Exception(f"파인튜닝 실행 실패: VLLM 작업 제출 실패")
+                raise Exception(f"파인튜닝 실행 실패: RunPod 작업 제출 실패")
 
         except Exception as e:
             task.status = FineTuningStatus.FAILED
@@ -867,6 +805,13 @@ class InfluencerFineTuningService:
             )
 
             # 파인튜닝 작업 시작 (모델 인스턴스 직접 사용)
+            logger.info(f"📝 파인튜닝 작업 시작 중...")
+            logger.info(f"  - influencer_id: {influencer_id}")
+            logger.info(f"  - s3_qa_file_url: {s3_qa_file_url}")
+            logger.info(f"  - task_id: {task_id}")
+            logger.info(f"  - hf_token 존재: {'Yes' if hf_token else 'No'}")
+            logger.info(f"  - hf_username: {hf_username}")
+            
             ft_task_id = await self.start_finetuning_task(
                 influencer_id=influencer_id,
                 qa_task_id=f"startup_restart_{influencer_id}",
@@ -875,11 +820,16 @@ class InfluencerFineTuningService:
                 db=db,
                 task_id=task_id
             )
+            
+            logger.info(f"📝 파인튜닝 작업 ID 생성됨: {ft_task_id}")
 
             # 파인튜닝 실행
+            logger.info(f"🚀 파인튜닝 실행 시작...")
             success = await self.execute_finetuning_task(
                 ft_task_id, influencer_data, hf_token, db
             )
+            
+            logger.info(f"📊 파인튜닝 실행 결과: {'성공' if success else '실패'}")
 
             if success:
                 logger.info(f"✅ 인플루언서 파인튜닝 자동 시작 성공: {influencer_id}")

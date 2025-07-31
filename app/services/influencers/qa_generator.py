@@ -10,7 +10,7 @@ import time
 import random
 import tempfile
 import logging
-import requests
+import asyncio
 from typing import List, Dict, Optional
 from openai import OpenAI
 from datetime import datetime
@@ -136,7 +136,7 @@ class InfluencerQAGenerator:
     def create_qa_batch_requests(self, character: CharacterProfile, num_requests: int = None, system_prompt: str = None) -> List[Dict]:
         """
         인플루언서 캐릭터를 위한 QA 생성 배치 요청 생성
-        VLLM 서버에서 직접 OpenAI Batch API 형식의 JSONL을 생성
+        로컬에서 직접 OpenAI Batch API 형식의 JSONL을 생성
         Args:
             character: 캐릭터 프로필
             num_requests: 생성할 QA 개수 (None이면 환경변수 QA_GENERATION_COUNT 사용)
@@ -147,135 +147,79 @@ class InfluencerQAGenerator:
         if num_requests is None:
             num_requests = settings.QA_GENERATION_COUNT
         
-        # VLLM 서버 URL 설정
-        vllm_server_url = getattr(settings, 'VLLM_BASE_URL', 'http://localhost:8000')
+        print(f"로컬에서 {num_requests}개 QA 생성 시작...")
         
-        # VLLM 서버에 요청할 캐릭터 프로필 데이터 준비
-        character_data = {
-            "name": character.name,
-            "description": character.description,
-            "age_range": character.age_range,
-            "gender": character.gender.value if hasattr(character.gender, 'value') else character.gender if character.gender else "없음",
-            "personality": character.personality,
-            "mbti": character.mbti
+        # 도메인 설정
+        domains = ["일상생활", "과학기술", "사회이슈", "인문학", "스포츠", "역사문화"]
+        
+        # 도메인별 특성 설명
+        domain_descriptions = {
+            "일상생활": "일상의 소소한 일들, 취미, 습관, 음식, 주말 활동 등",
+            "과학기술": "AI, 기술 트렌드, 스마트폰, 미래 기술, 과학의 발전",
+            "사회이슈": "사회 문제, 환경, 불평등, 세대 간 차이, 미래 사회",
+            "인문학": "인생의 가치, 책, 예술, 철학, 역사의 교훈",
+            "스포츠": "운동, 건강관리, 스포츠 경기, 운동의 즐거움",
+            "역사문화": "전통문화, 역사적 장소, 문화의 다양성, 역사 인물"
         }
         
-        # VLLM 서버에서 JSONL 생성 작업 시작 (새로운 QA 전용 엔드포인트 사용)
-        try:
-            print(f"VLLM 서버에 {num_requests}개 QA JSONL 생성 작업 시작 요청...")
-            print(f"VLLM 서버 URL: {vllm_server_url}")
+        # 도메인별 QA 개수 계산 (균등 분배)
+        qa_per_domain = num_requests // len(domains)
+        
+        batch_requests = []
+        
+        # 캐릭터 정보 문자열로 변환
+        gender_str = character.gender.value if hasattr(character.gender, 'value') else str(character.gender) if character.gender else "없음"
+        
+        # 도메인별로 QA 생성
+        for domain_idx, domain in enumerate(domains):
+            current_domain_qa = qa_per_domain
             
-            request_data = {
-                "character": character_data,
-                "num_qa_pairs": num_requests,
-                "domains": ["일상생활", "과학기술", "사회이슈", "인문학", "스포츠", "역사문화"],
-                "system_prompt": system_prompt
-            }
-            print(f"요청 데이터: {json.dumps(request_data, ensure_ascii=False, indent=2)[:500]}...")
+            # 마지막 도메인에는 나머지 QA 모두 할당
+            if domain_idx == len(domains) - 1:
+                current_domain_qa = num_requests - len(batch_requests)
             
-            # 새로운 QA 생성 엔드포인트 사용
-            response = requests.post(
-                f"{vllm_server_url}/qa/generate_qa_for_influencer",
-                json=request_data,
-                timeout=30
-            )
+            print(f"도메인 '{domain}' QA 생성 중: {current_domain_qa}개")
             
-            if response.status_code == 200:
-                task_data = response.json()
-                task_id = task_data.get('task_id')
+            for i in range(current_domain_qa):
+                domain_desc = domain_descriptions.get(domain, domain)
                 
-                print(f"VLLM 서버 QA JSONL 생성 작업 시작 성공: task_id={task_id}")
+                # OpenAI Batch API 형식으로 변환
+                custom_id = f"influencer_qa_{character.name}_{domain}_{i}"
+                batch_request = {
+                    "custom_id": custom_id,
+                    "method": "POST",
+                    "url": "/v1/chat/completions",
+                    "body": {
+                        "model": "gpt-4o-mini",
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": system_prompt or f"당신은 {character.name}라는 인플루언서입니다. {character.personality} 성격을 가지고 있습니다."
+                            },
+                            {
+                                "role": "user",
+                                "content": f"""{domain}({domain_desc})에 관한 QA 쌍을 하나 만들어주세요.
+{character.name}의 성격과 특성에 맞는 자연스럽고 흥미로운 질문을 만들고, 그에 대해 캐릭터답게 답변해주세요.
+반드시 JSON 형식으로 답변해주세요:
+{{"q": "질문 내용", "a": "답변 내용"}}"""
+                            }
+                        ],
+                        "max_tokens": 500,
+                        "temperature": 0.8,
+                        "response_format": {"type": "json_object"}  # JSON 형식 강제
+                    }
+                }
                 
-                # 작업 완료까지 대기 (새로운 엔드포인트 사용)
-                batch_requests = self._wait_for_qa_completion(vllm_server_url, task_id)
+                batch_requests.append(batch_request)
                 
-                if batch_requests:
-                    print(f"QA JSONL 생성 완료: {len(batch_requests)}개 배치 요청")
-                    return batch_requests
-                else:
-                    print("QA JSONL 생성 작업이 실패했습니다.")
-                    raise Exception("vLLM 서버에서 QA JSONL 생성에 실패했습니다.")
-                        
-            else:
-                print(f"VLLM 서버 QA JSONL 생성 작업 시작 실패: {response.status_code} - {response.text}")
-                raise Exception(f"vLLM 서버 QA JSONL 생성 작업 시작 실패: {response.status_code} - {response.text}")
-                
-        except Exception as e:
-            print(f"VLLM 서버 QA JSONL 생성 오류: {e}")
-            raise Exception(f"vLLM 서버 QA JSONL 생성 오류: {e}")
+                # 진행상황 로깅 (100개마다)
+                if (i + 1) % 100 == 0:
+                    print(f"도메인 '{domain}' 진행: {i + 1}/{current_domain_qa}")
+        
+        print(f"QA 생성 완료: 총 {len(batch_requests)}개 배치 요청 생성")
+        return batch_requests
     
-    def _wait_for_qa_completion(self, vllm_server_url: str, task_id: str, max_wait_time: int = 1800) -> List[Dict]:
-        """
-        QA 생성 작업이 완료될 때까지 대기하고 결과를 반환 (새로운 엔드포인트 사용)
-        Args:
-            vllm_server_url: VLLM 서버 URL
-            task_id: 작업 ID
-            max_wait_time: 최대 대기 시간 (초, 기본 30분)
-        Returns:
-            OpenAI Batch API 형식의 배치 요청 리스트
-        """
-        import time
-        
-        start_time = time.time()
-        check_interval = 5  # 5초마다 상태 확인
-        
-        print(f"QA 생성 작업 완료 대기 중: task_id={task_id}")
-        
-        while time.time() - start_time < max_wait_time:
-            try:
-                # 새로운 QA 상태 확인 엔드포인트 사용
-                status_response = requests.get(
-                    f"{vllm_server_url}/qa/qa_status/{task_id}",
-                    timeout=10
-                )
-                
-                if status_response.status_code == 200:
-                    status_data = status_response.json()
-                    status = status_data.get('status')
-                    progress = status_data.get('progress', 0)
-                    completed = status_data.get('completed', 0)
-                    total_qa_pairs = status_data.get('total_qa_pairs', 0)
-                    domains = status_data.get('domains', [])
-                    
-                    print(f"QA 생성 진행 상황: {progress:.1f}% ({completed}/{total_qa_pairs}), 도메인: {', '.join(domains)}")
-                    
-                    if status == "completed":
-                        # 새로운 QA 결과 엔드포인트 사용
-                        result_response = requests.get(
-                            f"{vllm_server_url}/qa/qa_results/{task_id}",
-                            timeout=30
-                        )
-                        
-                        if result_response.status_code == 200:
-                            result_data = result_response.json()
-                            batch_requests = result_data.get('batch_requests', [])
-                            total_requests = result_data.get('total_requests', 0)
-                            domains = result_data.get('domains', [])
-                            
-                            print(f"QA 생성 완료: {total_requests}개 배치 요청, 도메인: {', '.join(domains)}")
-                            return batch_requests
-                        else:
-                            print(f"QA 결과 가져오기 실패: {result_response.status_code}")
-                            return []
-                    
-                    elif status == "failed":
-                        error_msg = status_data.get('error', '알 수 없는 오류')
-                        print(f"QA 생성 작업이 실패했습니다: {error_msg}")
-                        return []
-                    
-                    # 아직 진행 중이면 대기
-                    time.sleep(check_interval)
-                    
-                else:
-                    print(f"QA 상태 확인 실패: {status_response.status_code}")
-                    time.sleep(check_interval)
-                    
-            except Exception as e:
-                print(f"QA 상태 확인 오류: {e}")
-                time.sleep(check_interval)
-        
-        print(f"QA 생성 작업 시간 초과: {max_wait_time}초")
-        return []
+    # _wait_for_qa_completion 메서드는 더 이상 필요하지 않음 (로컬 생성으로 변경됨)
 
     # 폴백 QA 요청 생성 메서드는 제거됨 - vLLM 서버 실패 시 예외 발생
 
@@ -544,31 +488,19 @@ class InfluencerQAGenerator:
                 if tone_data:
                     print("🔍 tone_data 분석을 통한 시스템 프롬프트 생성 시작")
                     try:
-                        # vLLM 클라이언트 생성
-                        from app.services.vllm_client import VLLMClient, VLLMServerConfig
+                        # vLLM 클라이언트 사용 중단 - RunPod로 대체
+                        print("⚠️ vLLM 서버가 아닌 RunPod Serverless를 사용합니다")
+                        print("🔄 tone_data 분석 기능은 현재 지원되지 않습니다")
                         
-                        vllm_config = VLLMServerConfig(
-                            base_url=settings.VLLM_BASE_URL,
-                            timeout=getattr(settings, 'VLLM_TIMEOUT', 300)
-                        )
+                        # 기본 시스템 프롬프트 생성
+                        character_name = influencer_data.influencer_name
+                        personality = getattr(influencer_data, 'influencer_personality', '친근하고 활발한 성격')
                         
-                        # 캐릭터 정보 구성
-                        character_info = {
-                            "name": influencer_data.influencer_name,
-                            "age": getattr(influencer_data, 'influencer_age_group', '알 수 없음'),
-                            "personality": getattr(influencer_data, 'influencer_personality', '알 수 없음')
-                        }
+                        system_prompt = f"""당신은 {character_name}입니다. 
+{personality}을 가지고 있으며, 사용자와 친근하고 자연스럽게 대화합니다.
+대화할 때는 상대방을 존중하고, 공감하며, 도움이 되는 답변을 하려고 노력합니다."""
                         
-                        # tone_data 분석
-                        async with VLLMClient(vllm_config) as vllm_client:
-                            analysis_result = await vllm_client.analyze_tone_data(
-                                tone_data=tone_data,
-                                character_info=character_info
-                            )
-                        
-                        # 분석된 시스템 프롬프트 사용
-                        system_prompt = analysis_result.get("system_prompt", "")
-                        print(f"✅ 시스템 프롬프트 생성 완료: {system_prompt[:100]}...")
+                        print(f"✅ 기본 시스템 프롬프트 생성 완료: {system_prompt[:100]}...")
                         
                         # DB에 시스템 프롬프트 저장
                         influencer_data.system_prompt = system_prompt

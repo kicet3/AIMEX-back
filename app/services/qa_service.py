@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from fastapi import HTTPException
 
-from app.services.vllm_client import vllm_health_check
+from app.services.runpod_manager import get_vllm_manager
 from app.utils.data_mapping import create_character_data
 from app.services.influencers.qa_generator import (
     InfluencerQAGenerator,
@@ -70,7 +70,8 @@ class QAGenerationService:
 
         try:
             # vLLM 서버 상태 확인
-            if not await vllm_health_check():
+            vllm_manager = get_vllm_manager()
+            if not await vllm_manager.health_check():
                 raise HTTPException(
                     status_code=503, detail="vLLM 서버에 접속할 수 없습니다"
                 )

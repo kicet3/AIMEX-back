@@ -63,6 +63,18 @@ async def lifespan(app: FastAPI):
     logger.info(f"🔑 JWT ALGORITHM: {settings.ALGORITHM}")
     logger.info(f"🔑 ACCESS_TOKEN_EXPIRE_MINUTES: {settings.ACCESS_TOKEN_EXPIRE_MINUTES}")
 
+    # RunPod 서버 초기화
+    try:
+        from app.services.runpod_manager import initialize_runpod
+        
+        await initialize_runpod()
+        logger.info("✅ RunPod 초기화 완료")
+    except Exception as e:
+        logger.warning(f"⚠️ RunPod 초기화 실패 (TTS 기능이 제한될 수 있습니다): {e}")
+
+    # RunPod 엔드포인트는 이미 runpod_manager에서 초기화됨
+    # 중복 초기화 제거
+
     # MCP 서버 자동 실행 (데이터베이스에서 로드)
     try:
         from app.services.mcp_server_manager import get_mcp_server_manager
@@ -115,6 +127,7 @@ async def lifespan(app: FastAPI):
         import traceback
         logger.error(f"   오류 상세: {traceback.format_exc()}")
 
+
     logger.info("✅ AIMEX API Server ready")
 
     yield
@@ -137,6 +150,7 @@ async def lifespan(app: FastAPI):
         logger.info("✅ 배치 모니터링이 정상적으로 중지되었습니다")
     except Exception as e:
         logger.error(f"❌ 배치 모니터링 중지 중 오류: {e}")
+
 
     # 스케줄러 서비스 중지
     try:
