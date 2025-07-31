@@ -66,22 +66,23 @@ async def _process_tts_async(websocket: WebSocket, text: str, influencer_id: str
         # TTS 매니저 가져오기
         tts_manager = get_tts_manager()
         
-        # TTS 생성 요청 (비동기) - base_voice_id 추가
+        # TTS 생성 요청 (동기) - 새로운 메서드 사용
         logger.info(f"[WS] TTS 생성 요청: {text[:50]}...")
-        tts_params = {
+        job_input = {
             "text": text,
             "influencer_id": influencer_id,
-            "language": "ko",
-            "request_type":"sync"  # 동기 요청으로 설정
+            "voice_id": influencer_id,  # voice_id로 influencer_id 사용
+            "output_format": "wav"  # 기본값 wav
         }
         
         # base_voice_id와 presigned_url이 있으면 추가
         if base_voice_id and presigned_url:
-            tts_params["base_voice_id"] = base_voice_id
-            tts_params["base_voice_url"] = presigned_url
+            job_input["base_voice_id"] = base_voice_id
+            job_input["voice_data_base64"] = None  # presigned_url은 worker에서 처리
             logger.info(f"[WS] Voice cloning 모드로 TTS 생성 - base_voice_id: {base_voice_id}")
         
-        tts_result = await tts_manager.generate_voice(**tts_params)
+        # runsync 메서드 사용 (동기 요청)
+        tts_result = await tts_manager.runsync(job_input)
         
         # task_id 확인
         if not tts_result or not tts_result.get("id"):

@@ -110,16 +110,24 @@ async def generate_voice(
         voice_id = generated_voice.id
         logger.info(f"음성 생성 레코드 생성: voice_id={voice_id}")
         
-        # TTS 매니저로 음성 생성 요청
+        # TTS 매니저로 음성 생성 요청 - 새로운 메서드 사용
         logger.info(f"음성 생성 요청: text={request.text[:50]}..., influencer_id={request.influencer_id}")
         
-        result = await tts_manager.generate_voice(
-            text=request.text,
-            base_voice_url=presigned_url,  # presigned URL 사용
-            influencer_id=request.influencer_id,
-            base_voice_id=base_voice.id,  # base_voice ID 추가
-            voice_id=voice_id  # DB에서 생성된 ID 전달
-        )
+        job_input = {
+            "text": request.text,
+            "influencer_id": request.influencer_id,
+            "base_voice_id": base_voice.id,
+            "voice_id": voice_id,  # DB에서 생성된 ID 전달
+            "output_format": "wav"
+        }
+        
+        # presigned_url이 있으면 추가 (워커에서 처리)
+        if presigned_url:
+            # 워커가 URL을 처리할 수 있도록 전달
+            job_input["base_voice_url"] = presigned_url
+        
+        # run 메서드 사용 (비동기 요청)
+        result = await tts_manager.run(job_input)
         
         logger.info(f"RunPod 서버 응답: {result}")
         

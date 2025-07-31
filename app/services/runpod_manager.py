@@ -382,17 +382,17 @@ class TTSRunPodManager(BaseRunPodManager):
     def search_keywords(self) -> List[str]:
         return ["zonos", "tts", "voice", "speech"]
     
-    async def generate_voice(
-        self,
-        text: str,
-        voice_id: Optional[str] = None,
-        language: str = "ko",
-        **kwargs
-    ) -> Dict[str, Any]:
-        """TTS 음성 생성"""
-        import httpx
-        import json
-        
+    # 사전 정의된 감정 설정 (예제용)
+    PREDEFINED_EMOTIONS = {
+        "neutral": {"valence": 0.5, "arousal": 0.5},
+        "happy": {"valence": 0.8, "arousal": 0.7},
+        "sad": {"valence": 0.2, "arousal": 0.3},
+        "angry": {"valence": 0.1, "arousal": 0.8},
+        "surprised": {"valence": 0.6, "arousal": 0.9}
+    }
+    
+    async def run(self, job_input: Dict[str, Any]) -> Dict[str, Any]:
+        """비동기 TTS 음성 생성 (작업 ID 반환)"""
         try:
             # 엔드포인트 찾기
             endpoint = await self.find_endpoint()
@@ -401,43 +401,31 @@ class TTSRunPodManager(BaseRunPodManager):
             
             endpoint_id = endpoint["id"]
             
-            # 페이로드 구성
+            # 페이로드 구성 (고정값 포함)
             payload = {
                 "input": {
-                    "text": text,
-                    "language": language
+                    "text": job_input["text"],  # 필수값
+                    "language": job_input.get("language", "ko"),
+                    "speaking_rate": float(job_input.get("speaking_rate", 22.0)),
+                    "pitch_std": float(job_input.get("pitch_std", 40.0)),
+                    "cfg_scale": float(job_input.get("cfg_scale", 4.0)),
+                    "emotion": job_input.get("emotion", self.PREDEFINED_EMOTIONS["neutral"]),
+                    "emotion_name": job_input.get("emotion_name", None),
+                    "voice_data_base64": job_input.get("voice_data_base64", None),
+                    "output_format": job_input.get("output_format", "wav"),
+                    "influencer_id": job_input.get("influencer_id", None),
+                    "base_voice_id": job_input.get("base_voice_id", None),
+                    "voice_id": job_input.get("voice_id", None),
                 }
             }
             
-            # 음성 ID가 있으면 추가
-            if voice_id:
-                payload["input"]["voice_id"] = voice_id
+            # None 값 제거
+            payload["input"] = {k: v for k, v in payload["input"].items() if v is not None}
             
-            # base_voice_id 처리 (voice cloning을 위해)
-            base_voice_id = kwargs.pop("base_voice_id", None)
-            if base_voice_id:
-                payload["input"]["base_voice_id"] = base_voice_id
+            # Voice cloning 활성화 체크
+            if any(payload["input"].get(key) for key in ["base_voice_id", "voice_data_base64"]):
                 payload["input"]["use_voice_cloning"] = True
-                logger.info(f"🎤 Voice cloning 활성화 - base_voice_id: {base_voice_id}")
-            
-            # 기존 base_voice_data 처리 (하위 호환성)
-            base_voice_data = kwargs.pop("base_voice_data", None)
-            if base_voice_data and not base_voice_id:
-                payload["input"]["base_voice_data"] = base_voice_data
-                payload["input"]["use_voice_cloning"] = True
-                logger.info(f"🎤 Voice cloning 활성화 (base64 데이터 크기: {len(base_voice_data)} chars)")
-            
-            # 기존 base_voice_url 처리 (하위 호환성)
-            base_voice_url = kwargs.pop("base_voice_url", None)
-            if base_voice_url and not base_voice_id and not base_voice_data:
-                payload["input"]["base_voice_url"] = base_voice_url
-                payload["input"]["use_voice_cloning"] = True
-                logger.info(f"🎤 Voice cloning 활성화 (URL): {base_voice_url}")
-            
-            # 추가 파라미터가 있으면 추가
-            for key, value in kwargs.items():
-                if value is not None:
-                    payload["input"][key] = value
+                logger.info("🎤 Voice cloning 활성화")
             
             # RunPod API 호출
             base_url = "https://api.runpod.ai/v2"
@@ -451,14 +439,8 @@ class TTSRunPodManager(BaseRunPodManager):
                 "Content-Type": "application/json"
             }
             
-            # 비동기 호출 사용 (run)
-            if kwargs.get("request_type") == "sync":
-                url = f"{base_url}/{endpoint_id}/runsync"
-            else:
-                url = f"{base_url}/{endpoint_id}/run"
-            
-            logger.info(f"🎵 TTS 음성 생성 요청: {url}")
-            
+            url = f"{base_url}/{endpoint_id}/run"
+            logger.info(f"🎵 TTS run 요청: {url}")
             
             async with httpx.AsyncClient(timeout=300) as client:
                 response = await client.post(url, headers=headers, json=payload)
@@ -466,17 +448,101 @@ class TTSRunPodManager(BaseRunPodManager):
                 if response.status_code != 200:
                     error_msg = f"RunPod TTS API 오류: {response.status_code} - {response.text}"
                     logger.error(f"❌ {error_msg}")
-                    logger.error(f"❌ 요청 URL: {url}")
-                    logger.error(f"❌ 엔드포인트 ID: {endpoint_id}")
                     raise RunPodManagerError(error_msg)
                 
-                result = response.json()
-                
-                return result
+                return response.json()
                     
         except Exception as e:
-            logger.error(f"❌ TTS 음성 생성 실패: {e}")
-            raise RunPodManagerError(f"TTS 음성 생성 실패: {e}")
+            logger.error(f"❌ TTS run 실패: {e}")
+            raise RunPodManagerError(f"TTS run 실패: {e}")
+    
+    async def runsync(self, job_input: Dict[str, Any]) -> Dict[str, Any]:
+        """동기 TTS 음성 생성 (결과 대기)"""
+        try:
+            # 엔드포인트 찾기
+            endpoint = await self.find_endpoint()
+            if not endpoint or not endpoint.get("id"):
+                raise RunPodManagerError("TTS 엔드포인트를 찾을 수 없습니다")
+            
+            endpoint_id = endpoint["id"]
+            
+            # 페이로드 구성 (고정값 포함)
+            payload = {
+                "input": {
+                    "text": job_input["text"],  # 필수값
+                    "language": job_input.get("language", "ko"),
+                    "speaking_rate": float(job_input.get("speaking_rate", 22.0)),
+                    "pitch_std": float(job_input.get("pitch_std", 40.0)),
+                    "cfg_scale": float(job_input.get("cfg_scale", 4.0)),
+                    "emotion": job_input.get("emotion", self.PREDEFINED_EMOTIONS["neutral"]),
+                    "emotion_name": job_input.get("emotion_name", None),
+                    "voice_data_base64": job_input.get("voice_data_base64", None),
+                    "output_format": job_input.get("output_format", "wav"),
+                    "influencer_id": job_input.get("influencer_id", None),
+                    "base_voice_id": job_input.get("base_voice_id", None),
+                    "voice_id": job_input.get("voice_id", None),
+                }
+            }
+            
+            # None 값 제거
+            payload["input"] = {k: v for k, v in payload["input"].items() if v is not None}
+            
+            # Voice cloning 활성화 체크
+            if any(payload["input"].get(key) for key in ["base_voice_id", "voice_data_base64"]):
+                payload["input"]["use_voice_cloning"] = True
+                logger.info("🎤 Voice cloning 활성화")
+            
+            # RunPod API 호출
+            base_url = "https://api.runpod.ai/v2"
+            api_key = os.getenv("RUNPOD_API_KEY")
+            
+            if not api_key:
+                raise RunPodManagerError("RUNPOD_API_KEY가 설정되지 않았습니다")
+            
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            url = f"{base_url}/{endpoint_id}/runsync"
+            logger.info(f"⏳ TTS runsync 요청: {url}")
+            
+            async with httpx.AsyncClient(timeout=300) as client:
+                response = await client.post(url, headers=headers, json=payload)
+                
+                if response.status_code != 200:
+                    error_msg = f"RunPod TTS API 오류: {response.status_code} - {response.text}"
+                    logger.error(f"❌ {error_msg}")
+                    raise RunPodManagerError(error_msg)
+                
+                return response.json()
+                    
+        except Exception as e:
+            logger.error(f"❌ TTS runsync 실패: {e}")
+            raise RunPodManagerError(f"TTS runsync 실패: {e}")
+    
+    # 기존 generate_voice 메서드는 하위 호환성을 위해 유지
+    async def generate_voice(
+        self,
+        text: str,
+        voice_id: Optional[str] = None,
+        language: str = "ko",
+        **kwargs
+    ) -> Dict[str, Any]:
+        """TTS 음성 생성 (하위 호환성)"""
+        # 새로운 형식으로 변환
+        job_input = {
+            "text": text,
+            "voice_id": voice_id,
+            "language": language,
+            **kwargs
+        }
+        
+        # request_type으로 sync/async 구분
+        if kwargs.get("request_type") == "sync":
+            return await self.runsync(job_input)
+        else:
+            return await self.run(job_input)
     
     async def check_tts_status(self, task_id: str) -> Dict[str, Any]:
         """TTS 작업 상태 확인"""
