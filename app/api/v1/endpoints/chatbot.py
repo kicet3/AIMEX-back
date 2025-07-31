@@ -639,7 +639,9 @@ async def chatbot(
                             )
                             enhanced_message = user_message
 
-                # MCP 처리 로직 추가
+                # MCP 처리 로직 추가 (현재 비활성화 - MCP 서비스 구현 후 활성화)
+                # TODO: MCP 서비스 구현 후 주석 해제
+                """
                 try:
                     # MCP 처리 (도구 사용)
                     mcp_result = None
@@ -672,60 +674,80 @@ async def chatbot(
                         # MCP 결과가 있으면 도구 결과 기반 응답 생성
                         final_prompt = f"사용자 질문: {user_message}\n도구 결과: {mcp_result}\n위 정보를 바탕으로 답변해 주세요."
                     # else: enhanced_message (히스토리 포함된 원본 메시지) 사용
-                    
-                    system_prompt = (
-                        str(influencer.system_prompt)
-                        if influencer and influencer.system_prompt
-                        else "당신은 도움이 되는 AI 어시스턴트입니다."
-                    )
+                """
+                
+                # MCP 없이 직접 처리
+                final_prompt = enhanced_message
+                
+                system_prompt = (
+                    str(influencer.system_prompt)
+                    if influencer and influencer.system_prompt
+                    else "당신은 도움이 되는 AI 어시스턴트입니다."
+                )
 
-                    # 스트리밍 응답 생성 (RunPod 사용)
-                    token_count = 0
-                    full_response = ""
+                # 필수 파라미터 검증
+                if not hf_token:
+                    logger.error("[WS] HF 토큰이 없습니다")
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "content": "HuggingFace 토큰이 설정되지 않았습니다. 관리자에게 문의하세요."
+                    }))
+                    continue
+                
+                if not hf_repo:
+                    logger.error("[WS] HF repository가 없습니다")
+                    await websocket.send_text(json.dumps({
+                        "type": "error", 
+                        "content": "모델 저장소가 설정되지 않았습니다. 관리자에게 문의하세요."
+                    }))
+                    continue
 
-                    async for token in vllm_manager.generate_text_stream(
-                        prompt=final_prompt,
-                        lora_adapter=influencer_id if influencer_id else lora_repo_decoded,  # LoRA 어댑터 이름
-                        hf_repo=hf_repo,  # HuggingFace repository 경로
-                        hf_token=hf_token,  # HF 토큰
-                        system_message=system_prompt,
-                        influencer_name=(
-                            str(influencer.influencer_name) if influencer else "한세나"
-                        ),
-                        model_id=lora_repo_decoded,
-                        max_new_tokens=2048,
-                        temperature=0.7,
-                        max_tokens=512
-                    ):
-                        # 각 토큰을 실시간으로 클라이언트에 전송
-                        await websocket.send_text(
-                            json.dumps({"type": "token", "content": token})
-                        )
-                        full_response += token
-                        token_count += 1
+                # 스트리밍 응답 생성 (RunPod 사용)
+                token_count = 0
+                full_response = ""
 
-                        # 너무 많은 토큰이 오면 중단 (무한 루프 방지)
-                        if token_count > 2000:
-                            logger.warning(
-                                f"[WS] 토큰 수가 너무 많아 중단: {token_count}"
-                            )
-                            break
-
-                    # 스트리밍 완료 신호
+                # 새로운 stream 메서드 사용
+                payload = {
+                    "input": {
+                        "hf_token": hf_token,
+                        "hf_repo": hf_repo,
+                        "system_message": system_prompt,
+                        "prompt": final_prompt,
+                        "temperature": 0.7,
+                        "max_tokens": 512
+                    }
+                }
+                
+                async for token in vllm_manager.stream(payload):
+                    # 각 토큰을 실시간으로 클라이언트에 전송
                     await websocket.send_text(
-                        json.dumps({"type": "complete", "content": ""})
+                        json.dumps({"type": "token", "content": token})
                     )
+                    full_response += token
+                    token_count += 1
 
-                    # TTS 생성 시작 (비동기로 처리)
-                    if full_response.strip():
-                        # 비동기 태스크로 TTS 처리
-                        asyncio.create_task(
-                            _process_tts_async(
-                                websocket, 
-                                full_response, 
-                                influencer_id if influencer_id else "default"
-                            )
+                    # 너무 많은 토큰이 오면 중단 (무한 루프 방지)
+                    if token_count > 2000:
+                        logger.warning(
+                            f"[WS] 토큰 수가 너무 많아 중단: {token_count}"
                         )
+                        break
+
+                # 스트리밍 완료 신호
+                await websocket.send_text(
+                    json.dumps({"type": "complete", "content": ""})
+                )
+
+                # TTS 생성 시작 (비동기로 처리)
+                if full_response.strip():
+                    # 비동기 태스크로 TTS 처리
+                    asyncio.create_task(
+                        _process_tts_async(
+                            websocket, 
+                            full_response, 
+                            influencer_id if influencer_id else "default"
+                        )
+                    )
 
                     # 세션에 대화 저장 (메시지 타입 구분)
                     if full_response.strip():
@@ -750,6 +772,7 @@ async def chatbot(
                             )
                         except Exception as e:
                             logger.error(f"[WS] 세션 저장 실패: {e}")
+                        
                         model_info = {
                             "mode": "runpod",  # vllm → runpod 변경
                             "adapter": lora_repo_decoded,
@@ -759,23 +782,6 @@ async def chatbot(
                         
                     logger.info(
                         f"[WS] RunPod 스트리밍 응답 전송 완료 (토큰 수: {token_count})"
-                    )
-
-                except Exception as e:
-                    logger.error(f"[WS] RunPod 스트리밍 추론 중 오류: {e}")
-                    logger.error(f"[WS] Inference error type: {type(e).__name__}")
-                    logger.error(f"[WS] LoRA adapter: {lora_repo_decoded}")
-                    logger.error(f"[WS] User message: {user_message[:100]}..." if len(user_message) > 100 else f"[WS] User message: {user_message}")
-                    import traceback
-                    logger.error(f"[WS] Inference traceback:\n{traceback.format_exc()}")
-                    await websocket.send_text(
-                        json.dumps(
-                            {
-                                "type": "error",
-                                "error_code": "RUNPOD_INFERENCE_ERROR",
-                                "message": str(e),
-                            }
-                        )
                     )
 
             except WebSocketDisconnect:

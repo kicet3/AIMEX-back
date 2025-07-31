@@ -142,43 +142,47 @@ async def chatbot_chat(
                     except Exception as e:
                         logger.warning(f"⚠️ HF 토큰 가져오기 실패: {e}")
                 
-                # RunPod 텍스트 생성 요청
-                result = await vllm_manager.generate_text(
-                    prompt=request.message,
-                    lora_adapter=lora_adapter,
-                    hf_repo=hf_repo,
-                    hf_token=hf_token,
-                    system_message=system_message,
-                    temperature=0.7,
-                    max_tokens=200,
-                    stream=False
-                )
+                # 필수 파라미터 검증
+                if not hf_token or not hf_repo:
+                    logger.error(f"필수 파라미터 누락 - hf_token: {'있음' if hf_token else '없음'}, hf_repo: {'있음' if hf_repo else '없음'}")
+                    response_text = f"모델 설정이 완료되지 않았습니다. 관리자에게 문의하세요."
+                else:
+                    # RunPod 텍스트 생성 요청 (새로운 방식)
+                    payload = {
+                        "input": {
+                            "hf_token": hf_token,
+                            "hf_repo": hf_repo,
+                            "system_message": system_message,
+                            "prompt": request.message,
+                            "temperature": 0.7,
+                            "max_tokens": 200
+                        }
+                    }
+                    
+                    result = await vllm_manager.runsync(payload)
                 
                 # 응답 전체 로깅
-                logger.info(f"🔍 RunPod 응답 전체: {json.dumps(result, indent=2, ensure_ascii=False)}")
-                
-                # RunPod 응답 처리 (간소화된 형식)
-                if result.get("status") == "completed":
-                    # 새로운 형식: generated_text가 직접 반환됨
-                    response_text = result.get("generated_text", "")
-                    if response_text:
-                        logger.info(f"✅ 생성된 텍스트: {response_text[:100]}...")
-                    else:
-                        # 이전 형식 호환성을 위한 처리
+                    logger.info(f"🔍 RunPod 응답 전체: {json.dumps(result, indent=2, ensure_ascii=False)}")
+                    
+                    # RunPod 응답 처리 (새로운 형식)
+                    if result.get("status") == "completed":
+                        # output 내의 generated_text 확인
                         output = result.get("output", {})
-                        if isinstance(output, dict) and output.get("generated_text"):
-                            response_text = output.get("generated_text", "")
+                        response_text = output.get("generated_text", "")
+                        
+                        if response_text:
+                            logger.info(f"✅ 생성된 텍스트: {response_text[:100]}...")
                         else:
                             logger.warning(f"⚠️ 응답에 generated_text가 없음: {result}")
                             response_text = f"안녕하세요! 저는 {influencer.influencer_name}입니다. 응답 생성 중 문제가 발생했습니다."
-                elif result.get("status") == "failed":
-                    # 실패한 경우
-                    logger.error(f"❌ RunPod 요청 실패: {result.get('error', 'Unknown error')}")
-                    response_text = f"안녕하세요! 저는 {influencer.influencer_name}입니다. '{request.message}'에 대한 답변을 드리겠습니다."
-                else:
-                    # 예상하지 못한 응답 형식
-                    logger.warning(f"⚠️ 예상하지 못한 RunPod 응답 형식: {result}")
-                    response_text = f"안녕하세요! 저는 {influencer.influencer_name}입니다. '{request.message}'에 대한 답변을 드리겠습니다."
+                    elif result.get("status") == "failed":
+                        # 실패한 경우
+                        logger.error(f"❌ RunPod 요청 실패: {result.get('error', 'Unknown error')}")
+                        response_text = f"안녕하세요! 저는 {influencer.influencer_name}입니다. '{request.message}'에 대한 답변을 드리겠습니다."
+                    else:
+                        # 예상하지 못한 응답 형식
+                        logger.warning(f"⚠️ 예상하지 못한 RunPod 응답 형식: {result}")
+                        response_text = f"안녕하세요! 저는 {influencer.influencer_name}입니다. '{request.message}'에 대한 답변을 드리겠습니다."
 
                 logger.info(f"✅ RunPod 응답 생성 성공: {influencer.influencer_name}")
 
@@ -298,43 +302,50 @@ async def chatbot_for_user(
                     except Exception as e:
                         logger.warning(f"⚠️ HF 토큰 가져오기 실패: {e}")
                 
-                # RunPod 텍스트 생성 요청
-                result = await vllm_manager.generate_text(
-                    prompt=request.message,
-                    lora_adapter=lora_adapter,
-                    hf_repo=hf_repo,
-                    hf_token=hf_token,
-                    system_message=system_message,
-                    temperature=0.7,
-                    max_tokens=200,
-                    stream=False
-                )
-                
-                # 응답 전체 로깅
-                logger.info(f"🔍 [User] RunPod 응답 전체: {json.dumps(result, indent=2, ensure_ascii=False)}")
-                
-                # RunPod 응답 처리 (간소화된 형식)
-                if result.get("status") == "completed":
-                    # 새로운 형식: generated_text가 직접 반환됨
-                    response_text = result.get("generated_text", "")
-                    if response_text:
-                        logger.info(f"✅ 생성된 텍스트: {response_text[:100]}...")
-                    else:
-                        # 이전 형식 호환성을 위한 처리
-                        output = result.get("output", {})
-                        if isinstance(output, dict) and output.get("generated_text"):
-                            response_text = output.get("generated_text", "")
-                        else:
-                            logger.warning(f"⚠️ 응답에 generated_text가 없음: {result}")
-                            response_text = f"안녕하세요! 저는 {influencer.influencer_name}입니다. 응답 생성 중 문제가 발생했습니다."
-                elif result.get("status") == "failed":
-                    # 실패한 경우
-                    logger.error(f"❌ RunPod 요청 실패: {result.get('error', 'Unknown error')}")
-                    response_text = f"안녕하세요! 저는 {influencer.influencer_name}입니다. '{request.message}'에 대한 답변을 드리겠습니다."
+                # 필수 파라미터 검증
+                if not hf_token or not hf_repo:
+                    logger.error(f"필수 파라미터 누락 - hf_token: {'있음' if hf_token else '없음'}, hf_repo: {'있음' if hf_repo else '없음'}")
+                    response_text = f"모델 설정이 완료되지 않았습니다. 관리자에게 문의하세요."
                 else:
-                    # 예상하지 못한 응답 형식
-                    logger.warning(f"⚠️ 예상하지 못한 RunPod 응답 형식: {result}")
-                    response_text = f"안녕하세요! 저는 {influencer.influencer_name}입니다. '{request.message}'에 대한 답변을 드리겠습니다."
+                    # RunPod 텍스트 생성 요청 (새로운 방식)
+                    payload = {
+                        "input": {
+                            "hf_token": hf_token,
+                            "hf_repo": hf_repo,
+                            "system_message": system_message,
+                            "prompt": request.message,
+                            "temperature": 0.7,
+                            "max_tokens": 200
+                        }
+                    }
+                    
+                    result = await vllm_manager.runsync(payload)
+                    
+                    # 응답 전체 로깅
+                    logger.info(f"🔍 [User] RunPod 응답 전체: {json.dumps(result, indent=2, ensure_ascii=False)}")
+                    
+                    # RunPod 응답 처리 (간소화된 형식)
+                    if result.get("status") == "completed":
+                        # 새로운 형식: generated_text가 직접 반환됨
+                        response_text = result.get("generated_text", "")
+                        if response_text:
+                            logger.info(f"✅ 생성된 텍스트: {response_text[:100]}...")
+                        else:
+                            # 이전 형식 호환성을 위한 처리
+                            output = result.get("output", {})
+                            if isinstance(output, dict) and output.get("generated_text"):
+                                response_text = output.get("generated_text", "")
+                            else:
+                                logger.warning(f"⚠️ 응답에 generated_text가 없음: {result}")
+                                response_text = f"안녕하세요! 저는 {influencer.influencer_name}입니다. 응답 생성 중 문제가 발생했습니다."
+                    elif result.get("status") == "failed":
+                        # 실패한 경우
+                        logger.error(f"❌ RunPod 요청 실패: {result.get('error', 'Unknown error')}")
+                        response_text = f"안녕하세요! 저는 {influencer.influencer_name}입니다. '{request.message}'에 대한 답변을 드리겠습니다."
+                    else:
+                        # 예상하지 못한 응답 형식
+                        logger.warning(f"⚠️ 예상하지 못한 RunPod 응답 형식: {result}")
+                        response_text = f"안녕하세요! 저는 {influencer.influencer_name}입니다. '{request.message}'에 대한 답변을 드리겠습니다."
 
                 logger.info(f"✅ RunPod 응답 생성 성공: {influencer.influencer_name}")
 
@@ -431,17 +442,33 @@ async def chatbot_chat_stream(
                     except Exception as e:
                         logger.warning(f"⚠️ HF 토큰 가져오기 실패: {e}")
                 
-                # 스트리밍 응답 생성
+                # 필수 파라미터 검증
+                if not hf_token or not hf_repo:
+                    logger.error(f"필수 파라미터 누락 - hf_token: {'있음' if hf_token else '없음'}, hf_repo: {'있음' if hf_repo else '없음'}")
+                    # 스트리밍 에러 응답
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "모델 설정이 완료되지 않았습니다. 관리자에게 문의하세요."
+                    })
+                    await websocket.close()
+                    return
+                
+                # 스트리밍 응답 생성 (새로운 방식)
                 token_count = 0
-                async for token in vllm_manager.generate_text_stream(
-                    prompt=request.message,
-                    lora_adapter=lora_adapter,
-                    hf_repo=hf_repo,
-                    hf_token=hf_token,
-                    system_message=system_message,
-                    temperature=0.7,
-                    max_tokens=200
-                ):
+                
+                # 새로운 stream 메서드 사용
+                payload = {
+                    "input": {
+                        "hf_token": hf_token,
+                        "hf_repo": hf_repo,
+                        "system_message": system_message,
+                        "prompt": request.message,
+                        "temperature": 0.7,
+                        "max_tokens": 200
+                    }
+                }
+                
+                async for token in vllm_manager.stream(payload):
                     # 각 토큰을 실시간으로 클라이언트에 전송
                     logger.debug(f"🔄 스트리밍 토큰 전송: {repr(token)}")
                     yield f"data: {json.dumps({'text': token}, ensure_ascii=False)}\n\n"
