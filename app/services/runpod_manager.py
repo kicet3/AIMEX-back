@@ -720,7 +720,6 @@ class TTSRunPodManager(BaseRunPodManager):
             
             async with httpx.AsyncClient(timeout=300) as client:
                 response = await client.post(url, headers=headers, json=payload)
-                print(response.json())
                 if response.status_code != 200:
                     error_msg = f"RunPod TTS API 오류: {response.status_code} - {response.text}"
                     logger.error(f"❌ {error_msg}")

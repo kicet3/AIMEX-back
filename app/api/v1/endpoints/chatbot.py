@@ -95,11 +95,6 @@ async def _process_tts_async(websocket: WebSocket, text: str, influencer_id: str
         task_id = tts_result.get("id")
         logger.info(f"[WS] TTS 작업 생성됨: task_id={task_id}")
         
-        # RunPod 응답 구조 확인
-        logger.info(f"[WS] TTS 응답 전체 구조: {json.dumps(tts_result, indent=2)[:500]}...")  # 처음 500자만
-        
-        # RunPod sync 응답은 보통 다음과 같은 구조
-        # {"id": "xxx", "status": "COMPLETED", "output": {...}}
         if tts_result.get("status") == "COMPLETED":
             output = tts_result.get("output", {})
             logger.info(f"[WS] TTS output 구조: {list(output.keys()) if output else 'None'}")
@@ -116,7 +111,7 @@ async def _process_tts_async(websocket: WebSocket, text: str, influencer_id: str
                             "type": "audio",
                             "audio_base64": audio_base64,
                             "duration": output.get("duration"),
-                            "format": output.get("format", "mp3"),
+                            "format": output.get("format", "wav"),
                             "message": "음성이 생성되었습니다."
                         })
                     )
@@ -125,51 +120,6 @@ async def _process_tts_async(websocket: WebSocket, text: str, influencer_id: str
                     logger.error(f"[WS] TTS 오디오 전송 실패 (WebSocket 연결 끊김?): {send_error}")
             else:
                 logger.warning(f"[WS] TTS output에서 오디오 데이터를 찾을 수 없음. 가능한 키: {list(output.keys())}")
-        else:
-            # 비동기 작업인 경우 (run 사용 시)
-            if task_id:
-                logger.info(f"[WS] TTS 비동기 작업 시작됨. 상태 확인 중: task_id={task_id}")
-                
-                # 최대 30초 동안 상태 확인 (3초 간격으로 10번)
-                max_attempts = 10
-                for attempt in range(max_attempts):
-                    await asyncio.sleep(3)  # 3초 대기
-                    
-                    # TTS 상태 확인
-                    status_result = await tts_manager.check_tts_status(task_id)
-                    logger.info(f"[WS] TTS 상태 확인 (시도 {attempt+1}/{max_attempts}): {status_result.get('status')}")
-                    
-                    if status_result.get("status") == "COMPLETED":
-                        output = status_result.get("output", {})
-                        audio_base64 = output.get("audio_base64") or output.get("audio_data") or output.get("audio")
-                        
-                        if audio_base64:
-                            # WebSocket 연결 상태 확인
-                            try:
-                                # WebSocket으로 base64 오디오 데이터 전송
-                                await websocket.send_text(
-                                    json.dumps({
-                                        "type": "audio",
-                                        "audio_base64": audio_base64,
-                                        "duration": output.get("duration"),
-                                        "format": output.get("format", "mp3"),
-                                        "message": "음성이 생성되었습니다."
-                                    })
-                                )
-                                logger.info(f"[WS] TTS base64 오디오 전송 완료 (크기: {len(audio_base64)} bytes)")
-                                break
-                            except Exception as send_error:
-                                logger.error(f"[WS] TTS 오디오 전송 실패 (WebSocket 연결 끊김?): {send_error}")
-                                break
-                        else:
-                            logger.warning(f"[WS] 상태는 COMPLETED이지만 오디오 데이터가 없음")
-                    elif status_result.get("status") == "FAILED":
-                        logger.error(f"[WS] TTS 작업 실패: {status_result.get('error')}")
-                        break
-                else:
-                    logger.warning(f"[WS] TTS 작업 시간 초과: task_id={task_id}")
-            else:
-                logger.warning(f"[WS] TTS 상태가 COMPLETED가 아니고 task_id도 없음: {tts_result.get('status')}")
 
             
     except Exception as e:
@@ -705,14 +655,38 @@ async def chatbot(
                     
                     # 응답 처리
                     full_response = result
-                    # MCP 응답은 이미 완성된 형태이므로 바로 전송
+                    
+                    # 타이핑 시작 상태 전송 
                     await websocket.send_text(
-                        json.dumps({"type": "token", "content": mcp_result}, ensure_ascii=False)
+                        json.dumps({"type": "typing", "message": "답변 입력중..."}, ensure_ascii=False)
                     )
+                    
+                    # 받은 응답을 단어 단위로 분할해서 스트리밍
+                    words = full_response.split(' ')
+                    chunk_size = 2  # 2단어씩 전송
+                    token_count = 0
+                    
+                    for i in range(0, len(words), chunk_size):
+                        chunk_words = words[i:i + chunk_size]
+                        chunk_text = ' '.join(chunk_words)
+                        
+                        # 마지막 청크가 아니면 공백 추가
+                        if i + chunk_size < len(words):
+                            chunk_text += ' '
+                        
+                        # 클라이언트에 청크 전송
+                        await websocket.send_text(
+                            json.dumps({"type": "token", "content": chunk_text}, ensure_ascii=False)
+                        )
+                        token_count += 1
+                        
+                        # 스트리밍 효과를 위한 딜레이
+                        await asyncio.sleep(0.1)
+
+                    # 스트리밍 완료 신호
                     await websocket.send_text(
                         json.dumps({"type": "complete", "content": ""}, ensure_ascii=False)
                     )
-                    full_response = mcp_result
                     
                     # 사용자 메시지와 AI 응답 저장
                     if current_session_id:
@@ -866,13 +840,6 @@ async def chatbot(
                             )
                         except Exception as e:
                             logger.error(f"[WS] 세션 저장 실패: {e}")
-                        
-                        model_info = {
-                            "mode": "runpod",  # vllm → runpod 변경
-                            "adapter": lora_repo_decoded,
-                            "temperature": 0.7,
-                            "influencer_name": str(influencer.influencer_name) if influencer else "한세나"
-                        }
                         
                     logger.info(
                         f"[WS] RunPod 스트리밍 응답 전송 완료 (토큰 수: {token_count})"
