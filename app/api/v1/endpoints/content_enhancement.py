@@ -13,6 +13,7 @@ from app.schemas.content_enhancement import (
     ContentEnhancementApproval,
     ContentEnhancementList,
 )
+from app.services.runpod_manager import get_vllm_manager
 from app.services.content_enhancement_service import ContentEnhancementService
 from app.models.influencer import AIInfluencer
 from app.models.user import HFTokenManage
@@ -251,7 +252,7 @@ async def transform_with_influencer_tone(
 
         try:
             # vLLM 클라이언트 가져오기
-            vllm_client = await get_vllm_client()
+            vllm_client = get_vllm_manager()
 
             # 어댑터 레포지토리 경로 정리
             adapter_repo = str(ai_influencer.influencer_model_repo)
@@ -285,17 +286,21 @@ async def transform_with_influencer_tone(
 
             # vLLM 서버로 응답 생성 요청
             logger.info(f"Generating response for {model_id} using VLLM")
-            result = await vllm_client.generate_response(
-                user_message=request.content,
-                system_message=system_prompt,
-                influencer_name=str(ai_influencer.influencer_name),
-                model_id=model_id,
-                max_new_tokens=700,
-                temperature=0.7,
+            result = await vllm_client.runsync(
+                {
+                    "input": {
+                        "hf_token": decrypted_token,
+                        "hf_repo": adapter_repo,
+                        "system_message": system_prompt,
+                        "prompt": request.content,
+                        "temperature": 0.7,
+                        "max_tokens": 2048
+                    }
+                }
             )
 
             # 응답 추출 (vLLM은 설명만 변환)
-            transformed_content = result.get("response", "응답을 생성할 수 없습니다.")
+            transformed_content = result
             logger.info(f"✅ Generated response for {model_id}")
 
             # vLLM은 설명만 변환하므로 해시태그는 빈 리스트로 설정
