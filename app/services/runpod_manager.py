@@ -9,10 +9,8 @@ import json
 import logging
 import httpx
 import base64
-import aiohttp
 from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime
-import os
 from dotenv import load_dotenv
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -638,26 +636,59 @@ class TTSRunPodManager(BaseRunPodManager):
             
             # S3에서 파일 다운로드
             s3_service = S3Service()
-            s3_key = s3_url.replace(f"s3://{s3_service.bucket_name}/", "")
+            
+            # S3 URL에서 키 추출
+            if s3_url.startswith('https://'):
+                # https://bucket-name.s3.region.amazonaws.com/key 형식
+                if '.amazonaws.com/' in s3_url:
+                    s3_key = s3_url.split('.amazonaws.com/')[-1]
+                else:
+                    s3_key = s3_url.split('/')[-1]
+            elif s3_url.startswith(f"s3://{s3_service.bucket_name}/"):
+                # s3://bucket-name/key 형식
+                s3_key = s3_url.replace(f"s3://{s3_service.bucket_name}/", "")
+            else:
+                # 이미 키 형식인 경우
+                s3_key = s3_url
+            
+            logger.info(f"S3 URL에서 추출한 키: {s3_key}")
             
             # presigned URL 생성
             presigned_url = s3_service.generate_presigned_url(s3_key)
             if not presigned_url:
                 logger.error(f"S3 presigned URL 생성 실패: {s3_key}")
                 return None
+            
+            logger.info(f"생성된 presigned URL: {presigned_url}")  # URL 일부만 로깅
                 
-            # HTTP로 파일 다운로드
-            async with aiohttp.ClientSession() as session:
-                async with session.get(presigned_url) as response:
-                    if response.status != 200:
-                        logger.error(f"S3 파일 다운로드 실패: {response.status}")
+            # HTTP로 파일 다운로드 (httpx 사용)
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.get(presigned_url)
+                    
+                    if response.status_code != 200:
+                        logger.error(f"S3 파일 다운로드 실패: {response.status_code}")
                         return None
                         
                     # 바이너리 데이터를 base64로 인코딩
-                    file_data = await response.read()
+                    file_data = response.content
                     base64_data = base64.b64encode(file_data).decode('utf-8')
                     logger.info(f"음성 파일을 base64로 변환 완료 (크기: {len(base64_data)})")
                     return base64_data
+            except httpx.ConnectError as e:
+                logger.error(f"S3 연결 실패 (DNS 문제일 수 있음): {str(e)}")
+                # DNS 문제 해결을 위한 대체 방법 시도
+                try:
+                    # requests 라이브러리 사용 (동기적이지만 더 안정적)
+                    import requests
+                    response = requests.get(presigned_url, timeout=30)
+                    if response.status_code == 200:
+                        base64_data = base64.b64encode(response.content).decode('utf-8')
+                        logger.info(f"requests로 음성 파일 다운로드 성공 (크기: {len(base64_data)})")
+                        return base64_data
+                except Exception as req_e:
+                    logger.error(f"requests로도 다운로드 실패: {str(req_e)}")
+                return None
                     
         except Exception as e:
             logger.error(f"S3에서 음성 파일 가져오기 실패: {str(e)}")
@@ -697,7 +728,7 @@ class TTSRunPodManager(BaseRunPodManager):
                     "voice_id": job_input.get("voice_id", None),
                 }
             }
-            
+            print('payload', payload)
             # None 값 제거
             payload["input"] = {k: v for k, v in payload["input"].items() if v is not None}
             

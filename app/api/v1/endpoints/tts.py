@@ -125,7 +125,6 @@ async def generate_voice(
         if presigned_url:
             # 워커가 URL을 처리할 수 있도록 전달
             job_input["base_voice_url"] = presigned_url
-        print('job_input', job_input)
         # run 메서드 사용 (비동기 요청)
         result = await tts_manager.run(job_input)
         
