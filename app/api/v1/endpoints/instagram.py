@@ -572,7 +572,7 @@ async def generate_ai_response(message_text: str, influencer: AIInfluencer, send
         try:
             # vLLM 매니저 가져오기 및 서버 상태 확인
             vllm_manager = get_vllm_manager()
-            if not await vllm_manager.health_check():
+            if not await vllm_manager.simple_health_check():
                 logger.warning("⚠️ vLLM 서버에 접근할 수 없습니다. 기본 응답을 사용합니다.")
                 response = f"안녕하세요! {influencer.influencer_name}입니다! 😊 메시지 감사해요! 더 자세히 말씀해주시면 도움드릴게요!"
                 generation_info["model_used"] = "fallback"
@@ -624,12 +624,7 @@ async def generate_ai_response(message_text: str, influencer: AIInfluencer, send
                 result = await vllm_manager.runsync(payload)
                 
                 # 결과에서 텍스트 추출
-                response = ""
-                if result.get("status") == "completed":
-                    if "generated_text" in result:
-                        response = result["generated_text"]
-                    elif result.get("output") and "generated_text" in result["output"]:
-                        response = result["output"]["generated_text"]
+                response = result
                 
                 # 응답 후처리
                 response = response.strip()
