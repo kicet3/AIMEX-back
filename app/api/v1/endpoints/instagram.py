@@ -620,6 +620,7 @@ async def generate_ai_response(message_text: str, influencer: AIInfluencer, send
                 }
                 
                 # vLLM 매니저로 응답 생성 요청
+                logger.info(f"🚀 payload: {payload}")
                 logger.info(f"🚀 vLLM runsync 요청 시작...")
                 result = await vllm_manager.runsync(payload)
                 
