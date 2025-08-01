@@ -626,9 +626,6 @@ async def generate_ai_response(message_text: str, influencer: AIInfluencer, send
                 # 결과에서 텍스트 추출
                 response = result
                 
-                # 응답 후처리
-                response = response.strip()
-                
                 # 너무 길면 자르기 (DM은 간결해야 함)
                 if len(response) > 300:
                     response = response[:300] + "..."
