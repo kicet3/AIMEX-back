@@ -589,10 +589,15 @@ async def generate_ai_response(message_text: str, influencer: AIInfluencer, send
                 
                 # HuggingFace 토큰 조회
                 hf_token = None
-                if influencer.hf_manage_id:
+                hf_username = None
+                if influencer.hf_manage_id or influencer.group_id:
                     try:
-                        hf_token = get_token_for_influencer(influencer.influencer_id, db)
-                        logger.info(f"✅ HF 토큰 조회 완료")
+                        # get_token_for_influencer는 (복호화된_토큰, 사용자명) 튜플을 반환
+                        hf_token, hf_username = await get_token_for_influencer(influencer, db)
+                        if hf_token:
+                            logger.info(f"✅ HF 토큰 조회 완료 (사용자: {hf_username})")
+                        else:
+                            logger.warning("⚠️ HF 토큰을 찾을 수 없습니다")
                     except Exception as token_error:
                         logger.warning(f"⚠️ HF 토큰 조회 실패: {token_error}")
                 
