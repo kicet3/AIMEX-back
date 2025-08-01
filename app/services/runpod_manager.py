@@ -8,12 +8,18 @@ import os
 import json
 import logging
 import httpx
+import base64
+import aiohttp
 from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime
 import os
 from dotenv import load_dotenv
 from abc import ABC, abstractmethod
 from enum import Enum
+from sqlalchemy.orm import Session
+from app.database import get_db
+from app.models.influencer import AIInfluencer
+from app.services.s3_service import S3Service
 
 load_dotenv()
 
@@ -602,6 +608,61 @@ class TTSRunPodManager(BaseRunPodManager):
         "surprised": {"valence": 0.6, "arousal": 0.9}
     }
     
+    async def _get_voice_data_from_s3(self, influencer_id: Optional[str], base_voice_id: Optional[str]) -> Optional[str]:
+        """S3에서 음성 파일을 가져와 base64로 변환"""
+        try:
+            if not influencer_id and not base_voice_id:
+                return None
+                
+            # DB에서 인플루언서 정보 가져오기
+            db: Session = next(get_db())
+            try:
+                if influencer_id:
+                    influencer = db.query(AIInfluencer).filter(
+                        AIInfluencer.influencer_id == influencer_id
+                    ).first()
+                    
+                    if influencer and influencer.voice_base and influencer.voice_base.s3_url:
+                        s3_url = influencer.voice_base.s3_url
+                        logger.info(f"인플루언서 {influencer_id}의 voice_base S3 URL 찾음: {s3_url}")
+                    else:
+                        logger.warning(f"인플루언서 {influencer_id}의 voice_base를 찾을 수 없음")
+                        return None
+                else:
+                    # base_voice_id로 직접 조회하는 로직 필요시 구현
+                    logger.warning("base_voice_id로 직접 조회는 아직 구현되지 않음")
+                    return None
+                    
+            finally:
+                db.close()
+            
+            # S3에서 파일 다운로드
+            s3_service = S3Service()
+            s3_key = s3_url.replace(f"s3://{s3_service.bucket_name}/", "")
+            
+            # presigned URL 생성
+            presigned_url = s3_service.generate_presigned_url(s3_key)
+            if not presigned_url:
+                logger.error(f"S3 presigned URL 생성 실패: {s3_key}")
+                return None
+                
+            # HTTP로 파일 다운로드
+            async with aiohttp.ClientSession() as session:
+                async with session.get(presigned_url) as response:
+                    if response.status != 200:
+                        logger.error(f"S3 파일 다운로드 실패: {response.status}")
+                        return None
+                        
+                    # 바이너리 데이터를 base64로 인코딩
+                    file_data = await response.read()
+                    base64_data = base64.b64encode(file_data).decode('utf-8')
+                    logger.info(f"음성 파일을 base64로 변환 완료 (크기: {len(base64_data)})")
+                    return base64_data
+                    
+        except Exception as e:
+            logger.error(f"S3에서 음성 파일 가져오기 실패: {str(e)}")
+            return None
+    
     async def run(self, job_input: Dict[str, Any]) -> Dict[str, Any]:
         """비동기 TTS 음성 생성 (작업 ID 반환)"""
         try:
@@ -611,6 +672,13 @@ class TTSRunPodManager(BaseRunPodManager):
                 raise RunPodManagerError("TTS 엔드포인트를 찾을 수 없습니다")
             
             endpoint_id = endpoint["id"]
+            
+            # voice_data_base64 처리
+            voice_data_base64 = job_input.get("voice_data_base64", None)
+            
+            # influencer_id나 base_voice_id가 있고 voice_data_base64가 없으면 S3에서 가져오기
+            if not voice_data_base64 and (job_input.get("influencer_id") or job_input.get("base_voice_id")):
+                voice_data_base64 = await self._get_voice_data_from_s3(job_input.get("influencer_id"), job_input.get("base_voice_id"))
             
             # 페이로드 구성 (고정값 포함)
             payload = {
@@ -622,7 +690,7 @@ class TTSRunPodManager(BaseRunPodManager):
                     "cfg_scale": float(job_input.get("cfg_scale", 4.0)),
                     "emotion": job_input.get("emotion", self.PREDEFINED_EMOTIONS["neutral"]),
                     "emotion_name": job_input.get("emotion_name", None),
-                    "voice_data_base64": job_input.get("voice_data_base64", None),
+                    "voice_data_base64": voice_data_base64,
                     "output_format": job_input.get("output_format", "wav"),
                     "influencer_id": job_input.get("influencer_id", None),
                     "base_voice_id": job_input.get("base_voice_id", None),
@@ -677,6 +745,13 @@ class TTSRunPodManager(BaseRunPodManager):
             
             endpoint_id = endpoint["id"]
             
+            # voice_data_base64 처리
+            voice_data_base64 = job_input.get("voice_data_base64", None)
+            
+            # influencer_id나 base_voice_id가 있고 voice_data_base64가 없으면 S3에서 가져오기
+            if not voice_data_base64 and (job_input.get("influencer_id") or job_input.get("base_voice_id")):
+                voice_data_base64 = await self._get_voice_data_from_s3(job_input.get("influencer_id"), job_input.get("base_voice_id"))
+            
             # 페이로드 구성 (고정값 포함)
             payload = {
                 "input": {
@@ -687,7 +762,7 @@ class TTSRunPodManager(BaseRunPodManager):
                     "cfg_scale": float(job_input.get("cfg_scale", 4.0)),
                     "emotion": job_input.get("emotion", self.PREDEFINED_EMOTIONS["neutral"]),
                     "emotion_name": job_input.get("emotion_name", None),
-                    "voice_data_base64": job_input.get("voice_data_base64", None),
+                    "voice_data_base64": voice_data_base64,
                     "output_format": job_input.get("output_format", "wav"),
                     "influencer_id": job_input.get("influencer_id", None),
                     "base_voice_id": job_input.get("base_voice_id", None),

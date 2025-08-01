@@ -83,7 +83,7 @@ async def _process_tts_async(websocket: WebSocket, text: str, influencer_id: str
             job_input["base_voice_id"] = base_voice_id
             job_input["voice_data_base64"] = None  # presigned_url은 worker에서 처리
             logger.info(f"[WS] Voice cloning 모드로 TTS 생성 - base_voice_id: {base_voice_id}")
-        
+        print(job_input)
         # runsync 메서드 사용 (동기 요청)
         tts_result = await tts_manager.runsync(job_input)
         
