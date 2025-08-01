@@ -808,7 +808,7 @@ class UserSessionService:
                                 "pod_id": pod_id,
                                 "pod_status": "ready",
                                 "endpoint_url": f"https://{pod_id}-8188.proxy.runpod.net",
-                                "message": "Pod가 준비되었습니다. 이미지 생성이 가능합니다."
+                                "message": "🎨 RunPod가 준비 완료되었습니다! 이제 이미지 생성이 가능합니다."
                             }
                         })
                         logger.info(f"📨 WebSocket으로 pod_ready 메시지 전송 완료: user {user_id}")
