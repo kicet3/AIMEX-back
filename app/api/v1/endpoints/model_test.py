@@ -97,8 +97,8 @@ async def process_single_influencer(
         payload = {
             "input": {
                 "prompt": message,  # 사용자 메시지만 전달
-                "max_tokens": 150,
-                "temperature": 0.7,
+                "max_tokens": 2048,
+                "temperature": 0.8,
                 "stream": False,
                 "lora_adapter": str(influencer_info.influencer_id),
                 "hf_repo": adapter_repo,

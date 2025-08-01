@@ -616,8 +616,8 @@ async def generate_ai_response(message_text: str, influencer: AIInfluencer, send
                         "hf_repo": model_repo or "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct",
                         "system_message": system_message,
                         "prompt": message_text,
-                        "temperature": 0.7,
-                        "max_tokens": 300,
+                        "temperature": 0.8,
+                        "max_tokens": 2048,
                         "top_p": 0.9,
                         "top_k": 50,
                         "repetition_penalty": 1.1

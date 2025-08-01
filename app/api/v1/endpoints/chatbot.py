@@ -645,8 +645,8 @@ async def chatbot(
                             "hf_repo": hf_repo,
                             "system_message": system_prompt,
                             "prompt": mcp_result,
-                            "temperature": 0.7,
-                            "max_tokens": 512
+                            "temperature": 1,
+                            "max_tokens": 2048
                         }
                     }
                     
@@ -762,8 +762,8 @@ async def chatbot(
                         "hf_repo": hf_repo,
                         "system_message": system_prompt,
                         "prompt": final_prompt,
-                        "temperature": 0.7,
-                        "max_tokens": 512
+                        "temperature": 1,
+                        "max_tokens": 2048
                     }
                 }
                 

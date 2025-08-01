@@ -1922,8 +1922,8 @@ async def chat_with_influencer(
                     payload = {
                         "input": {
                             "messages": messages,
-                            "max_tokens": 512,
-                            "temperature": 0.7,
+                            "max_tokens": 2048,
+                            "temperature": 0.8,
                             "stream": False,
                             "lora_adapter": str(api_key.influencer_id),
                             "hf_repo": model_id,
