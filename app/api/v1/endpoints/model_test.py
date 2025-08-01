@@ -93,44 +93,28 @@ async def process_single_influencer(
         # vLLM 매니저로 응답 생성 요청
         logger.info(f"Generating response for {influencer_info.influencer_id} using vLLM Manager")
         
-        # 메시지 구성
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": message})
-        
         # RunPod vLLM worker에 맞는 페이로드 구성
         payload = {
             "input": {
-                "messages": messages,
+                "prompt": message,  # 사용자 메시지만 전달
                 "max_tokens": 150,
                 "temperature": 0.7,
                 "stream": False,
                 "lora_adapter": str(influencer_info.influencer_id),
                 "hf_repo": adapter_repo,
-                "hf_token": hf_token
+                "hf_token": hf_token,
+                "system_message": system_prompt
             }
         }
         
         logger.info(f"🎯 LoRA 어댑터 설정: {influencer_info.influencer_id} from {adapter_repo}")
-        
         # RunPod runsync 메서드 사용
         result = await vllm_manager.runsync(payload)
-        
         # 응답 추출
-        if result.get("status") == "completed" and result.get("output"):
-            output = result["output"]
-            if output.get("status") == "success":
-                response_text = output.get("generated_text", "")
-            else:
-                response_text = "응답을 생성할 수 없습니다."
-        else:
-            response_text = result.get("generated_text", "응답을 생성할 수 없습니다.")
-        logger.info(f"✅ Generated response for {influencer_info.influencer_id}")
         
         return InfluencerResponse(
             influencer_id=influencer_info.influencer_id,
-            response=response_text
+            response=result
         )
         
     except Exception as e:

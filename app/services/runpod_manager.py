@@ -720,7 +720,7 @@ class TTSRunPodManager(BaseRunPodManager):
             
             async with httpx.AsyncClient(timeout=300) as client:
                 response = await client.post(url, headers=headers, json=payload)
-                
+                print(response.json())
                 if response.status_code != 200:
                     error_msg = f"RunPod TTS API 오류: {response.status_code} - {response.text}"
                     logger.error(f"❌ {error_msg}")
@@ -926,16 +926,43 @@ class VLLMRunPodManager(BaseRunPodManager):
         }
         
         logger.info(f"⏳ RunPod runsync 요청: {url}")
+        logger.info(f"📦 Payload: {json.dumps(payload, ensure_ascii=False)[:500]}...")
         
-        async with httpx.AsyncClient(timeout=300) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            
-            if response.status_code != 200:
-                error_msg = f"RunPod API 오류: {response.status_code} - {response.text}"
-                logger.error(f"❌ {error_msg}")
-                raise RunPodManagerError(error_msg)
-            
-            return response.json()
+        try:
+            async with httpx.AsyncClient(timeout=300) as client:
+                response = await client.post(url, headers=headers, json=payload)
+                
+                logger.info(f"📡 Response status: {response.status_code}")
+                logger.info(f"📋 Response headers: {dict(response.headers)}")
+                
+                if response.status_code != 200:
+                    error_msg = f"RunPod API 오류: {response.status_code} - {response.text}"
+                    logger.error(f"❌ {error_msg}")
+                    raise RunPodManagerError(error_msg)
+                
+                result = response.json()
+                logger.info(f"✅ RunPod response: {json.dumps(result, ensure_ascii=False)[:500]}...")
+                
+                # RunPod 응답에서 실제 텍스트 추출
+                if "output" in result:
+                    # output이 문자열인 경우
+                    if isinstance(result["output"], str):
+                        return result["output"]["generated_text"]
+                    # output이 딕셔너리인 경우
+                    elif isinstance(result["output"], dict):
+                        return result["output"].get("generated_text", result["output"])
+                    else:
+                        return result["output"]
+                else:
+                    logger.warning(f"⚠️ Unexpected response format: {result}")
+                    return result
+                    
+        except httpx.TimeoutException as e:
+            logger.error(f"❌ RunPod 요청 타임아웃: {e}")
+            raise RunPodManagerError(f"RunPod 요청 타임아웃 (300초 초과)")
+        except Exception as e:
+            logger.error(f"❌ RunPod runsync 실패: {e}")
+            raise RunPodManagerError(f"RunPod runsync 실패: {e}")
     
     async def stream(self, payload: Dict[str, Any]):
         """스트리밍 요청"""

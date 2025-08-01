@@ -47,6 +47,7 @@ async def _process_tts_async(websocket: WebSocket, text: str, influencer_id: str
             
             base_voice_id = None
             presigned_url = None
+            
             if influencer and influencer.voice_base:
                 base_voice_id = str(influencer.voice_base.id)
                 logger.info(f"[WS] 인플루언서 {influencer_id}의 base_voice_id 찾음: {base_voice_id}")
@@ -72,8 +73,9 @@ async def _process_tts_async(websocket: WebSocket, text: str, influencer_id: str
         job_input = {
             "text": text,
             "influencer_id": influencer_id,
-            "voice_id": influencer_id,  # voice_id로 influencer_id 사용
-            "output_format": "wav"  # 기본값 wav
+            "base_voice_id": base_voice_id,  # voice_id로 influencer_id 사용
+            "output_format": "wav",  # 기본값 wav
+            "emotion_name": "neutral"  # 기본 감정 설정
         }
         
         # base_voice_id와 presigned_url이 있으면 추가
@@ -83,7 +85,7 @@ async def _process_tts_async(websocket: WebSocket, text: str, influencer_id: str
             logger.info(f"[WS] Voice cloning 모드로 TTS 생성 - base_voice_id: {base_voice_id}")
         
         # runsync 메서드 사용 (동기 요청)
-        tts_result = await tts_manager.run(job_input)
+        tts_result = await tts_manager.runsync(job_input)
         
         # task_id 확인
         if not tts_result or not tts_result.get("id"):
@@ -575,12 +577,14 @@ async def chatbot(
                     user_message = data
                     logger.info(f"[WS] 일반 텍스트 메시지로 처리")
 
-                # 세션 관리
-                if current_session_id is None:
-                    # 새 세션 생성
-                    current_session_id = chat_message_service.create_session(
-                        influencer_id or "default"
-                    )
+                # chat 메시지 처리 (일반 대화)
+                if message_type == "chat":
+                    # 세션 관리
+                    if current_session_id is None:
+                        # 새 세션 생성
+                        current_session_id = chat_message_service.create_session(
+                            influencer_id or "default"
+                        )
                     logger.info(f"[WS] 새 세션 생성: session_id={current_session_id}")
 
                 # 의도 기반 히스토리 컨텍스트 추가
@@ -685,8 +689,22 @@ async def chatbot(
                 
                 # 최종 메시지 구성
                 if mcp_result:
-                    # MCP 결과가 있으면 그대로 사용 (이미 자연어 응답)
-                    final_prompt = mcp_result
+                    payload = {
+                        "input": {
+                            "hf_token": hf_token,
+                            "hf_repo": hf_repo,
+                            "system_message": system_prompt,
+                            "prompt": mcp_result,
+                            "temperature": 0.7,
+                            "max_tokens": 512
+                        }
+                    }
+                    
+                    # runsync로 전체 응답 받기
+                    result = await vllm_manager.runsync(payload)
+                    
+                    # 응답 처리
+                    full_response = result
                     # MCP 응답은 이미 완성된 형태이므로 바로 전송
                     await websocket.send_text(
                         json.dumps({"type": "token", "content": mcp_result}, ensure_ascii=False)
@@ -779,21 +797,8 @@ async def chatbot(
                 result = await vllm_manager.runsync(payload)
                 
                 # 응답 처리
-                full_response = ""
-                if result.get("status") == "completed":
-                    full_response = result.get("generated_text", "")
-                    if not full_response:
-                        # 이전 형식 호환성
-                        output = result.get("output", {})
-                        full_response = output.get("generated_text", "")
-                    
-                    if not full_response:
-                        full_response = "응답 생성 중 문제가 발생했습니다."
-                        
-                    logger.info(f"[WS] 생성된 텍스트: {full_response[:100]}...")
-                else:
-                    logger.error(f"[WS] RunPod 요청 실패: {result.get('error', 'Unknown error')}")
-                    full_response = "응답 생성 중 문제가 발생했습니다."
+                full_response = result
+                
                 
                 # 타이핑 시작 상태 전송 
                 await websocket.send_text(
@@ -801,8 +806,7 @@ async def chatbot(
                 )
                 
                 # 받은 응답을 단어 단위로 분할해서 스트리밍
-                import asyncio
-                words = full_response.split()
+                words = full_response.split(' ')
                 chunk_size = 2  # 2단어씩 전송
                 token_count = 0
                 
